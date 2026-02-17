@@ -1,0 +1,253 @@
+module Test.VotingTest where
+
+import Daml.Script
+import DA.Date (date, Month(..))
+
+import Identity.Types
+import Identity.Roles
+import Voting.Voting
+
+-- | Test 1: Full election lifecycle
+testElectionLifecycle : Script ()
+testElectionLifecycle = do
+  commission <- allocatePartyByHint (PartyIdHint "election-commission")
+  alice <- allocatePartyByHint (PartyIdHint "alice")
+  bob <- allocatePartyByHint (PartyIdHint "bob")
+
+  -- Register election commission
+  submit commission do
+    createCmd ElectionCommission with
+      authority = commission
+      jurisdiction = "US"
+
+  -- Register voters
+  aliceRegReqCid <- submit alice do
+    createCmd VoterRegistrationRequest with
+      voter = alice
+      commission
+      voterInfo = VoterInfo with
+        personalInfo = PersonalInfo with
+          fullName = "Alice Johnson"
+          dateOfBirth = date 1990 Jan 15
+          nationality = "US"
+        constituency = "District 1"
+        voterIdNumber = "V-001"
+
+  aliceRegCid <- submit commission do
+    exerciseCmd aliceRegReqCid ApproveRegistration
+
+  bobRegReqCid <- submit bob do
+    createCmd VoterRegistrationRequest with
+      voter = bob
+      commission
+      voterInfo = VoterInfo with
+        personalInfo = PersonalInfo with
+          fullName = "Bob Smith"
+          dateOfBirth = date 1985 Mar 20
+          nationality = "US"
+        constituency = "District 1"
+        voterIdNumber = "V-002"
+
+  bobRegCid <- submit commission do
+    exerciseCmd bobRegReqCid ApproveRegistration
+
+  -- Create election
+  electionCid <- submit commission do
+    createCmd Election with
+      commission
+      electionId = "2024-GENERAL"
+      description = "2024 General Election"
+      candidates = ["Candidate A", "Candidate B", "Candidate C"]
+      status = Open
+      voters = []
+
+  -- Cast ballots (voters need readAs commission to see the election)
+  (electionCid2, _ballotCid) <- submit (actAs alice <> readAs commission) do
+    exerciseCmd electionCid CastBallot with
+      voter = alice
+      voterRegCid = aliceRegCid
+      choice_ = "Candidate A"
+
+  (_electionCid3, _ballotCid2) <- submit (actAs bob <> readAs commission) do
+    exerciseCmd electionCid2 CastBallot with
+      voter = bob
+      voterRegCid = bobRegCid
+      choice_ = "Candidate B"
+
+  -- Close election (use the latest election CID)
+  closedElectionCid <- submit commission do
+    exerciseCmd _electionCid3 CloseElection
+
+  -- Publish results
+  resultCid <- submit commission do
+    exerciseCmd closedElectionCid PublishResult with
+      results = "Candidate A: 1, Candidate B: 1, Candidate C: 0"
+
+  -- Acknowledge results
+  submit commission do
+    exerciseCmd resultCid AcknowledgeResult
+
+  pure ()
+
+-- | Test 2: Double-vote prevention
+testDoubleVotePrevention : Script ()
+testDoubleVotePrevention = do
+  commission <- allocatePartyByHint (PartyIdHint "election-commission")
+  alice <- allocatePartyByHint (PartyIdHint "alice")
+
+  -- Register voter
+  regReqCid <- submit alice do
+    createCmd VoterRegistrationRequest with
+      voter = alice
+      commission
+      voterInfo = VoterInfo with
+        personalInfo = PersonalInfo with
+          fullName = "Alice Johnson"
+          dateOfBirth = date 1990 Jan 15
+          nationality = "US"
+        constituency = "District 1"
+        voterIdNumber = "V-001"
+
+  aliceRegCid <- submit commission do
+    exerciseCmd regReqCid ApproveRegistration
+
+  -- Create election
+  electionCid <- submit commission do
+    createCmd Election with
+      commission
+      electionId = "2024-GENERAL"
+      description = "2024 General Election"
+      candidates = ["Candidate A", "Candidate B"]
+      status = Open
+      voters = []
+
+  -- First vote succeeds
+  (electionCid2, _) <- submit (actAs alice <> readAs commission) do
+    exerciseCmd electionCid CastBallot with
+      voter = alice
+      voterRegCid = aliceRegCid
+      choice_ = "Candidate A"
+
+  -- Second vote fails (voter already in voters list)
+  submitMustFail (actAs alice <> readAs commission) do
+    exerciseCmd electionCid2 CastBallot with
+      voter = alice
+      voterRegCid = aliceRegCid
+      choice_ = "Candidate B"
+
+  pure ()
+
+-- | Test 3: Unregistered voter cannot vote
+testUnregisteredVoter : Script ()
+testUnregisteredVoter = do
+  commission <- allocatePartyByHint (PartyIdHint "election-commission")
+  alice <- allocatePartyByHint (PartyIdHint "alice")
+  bob <- allocatePartyByHint (PartyIdHint "bob")
+
+  -- Register alice but not bob
+  aliceRegReqCid <- submit alice do
+    createCmd VoterRegistrationRequest with
+      voter = alice
+      commission
+      voterInfo = VoterInfo with
+        personalInfo = PersonalInfo with
+          fullName = "Alice Johnson"
+          dateOfBirth = date 1990 Jan 15
+          nationality = "US"
+        constituency = "District 1"
+        voterIdNumber = "V-001"
+
+  aliceRegCid <- submit commission do
+    exerciseCmd aliceRegReqCid ApproveRegistration
+
+  -- Create election
+  electionCid <- submit commission do
+    createCmd Election with
+      commission
+      electionId = "2024-GENERAL"
+      description = "2024 General Election"
+      candidates = ["Candidate A", "Candidate B"]
+      status = Open
+      voters = []
+
+  -- Bob tries to vote with Alice's registration — should fail (voter mismatch)
+  submitMustFail (actAs bob <> readAs commission) do
+    exerciseCmd electionCid CastBallot with
+      voter = bob
+      voterRegCid = aliceRegCid
+      choice_ = "Candidate A"
+
+  pure ()
+
+-- | Test 4: Negative cases — voter can't close, can't vote after close
+testVotingNegativeCases : Script ()
+testVotingNegativeCases = do
+  commission <- allocatePartyByHint (PartyIdHint "election-commission")
+  alice <- allocatePartyByHint (PartyIdHint "alice")
+  bob <- allocatePartyByHint (PartyIdHint "bob")
+
+  -- Register alice
+  regReqCid <- submit alice do
+    createCmd VoterRegistrationRequest with
+      voter = alice
+      commission
+      voterInfo = VoterInfo with
+        personalInfo = PersonalInfo with
+          fullName = "Alice Johnson"
+          dateOfBirth = date 1990 Jan 15
+          nationality = "US"
+        constituency = "District 1"
+        voterIdNumber = "V-001"
+
+  aliceRegCid <- submit commission do
+    exerciseCmd regReqCid ApproveRegistration
+
+  -- Create election
+  electionCid <- submit commission do
+    createCmd Election with
+      commission
+      electionId = "2024-GENERAL"
+      description = "2024 General Election"
+      candidates = ["Candidate A", "Candidate B"]
+      status = Open
+      voters = []
+
+  -- Negative: Voter cannot close election
+  submitMustFail (actAs alice <> readAs commission) do
+    exerciseCmd electionCid CloseElection
+
+  -- Cast ballot
+  (electionCid2, _) <- submit (actAs alice <> readAs commission) do
+    exerciseCmd electionCid CastBallot with
+      voter = alice
+      voterRegCid = aliceRegCid
+      choice_ = "Candidate A"
+
+  -- Close election
+  closedElectionCid <- submit commission do
+    exerciseCmd electionCid2 CloseElection
+
+  -- Negative: Cannot vote on closed election
+  -- Register bob first
+  bobRegReqCid <- submit bob do
+    createCmd VoterRegistrationRequest with
+      voter = bob
+      commission
+      voterInfo = VoterInfo with
+        personalInfo = PersonalInfo with
+          fullName = "Bob Smith"
+          dateOfBirth = date 1985 Mar 20
+          nationality = "US"
+        constituency = "District 1"
+        voterIdNumber = "V-002"
+
+  bobRegCid <- submit commission do
+    exerciseCmd bobRegReqCid ApproveRegistration
+
+  submitMustFail (actAs bob <> readAs commission) do
+    exerciseCmd closedElectionCid CastBallot with
+      voter = bob
+      voterRegCid = bobRegCid
+      choice_ = "Candidate B"
+
+  pure ()

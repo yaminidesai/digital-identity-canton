@@ -1,0 +1,108 @@
+module Civil.BirthCertificate where
+
+-- | Sex classification for birth registration
+data Sex
+  = Male
+  | Female
+  | Other
+  deriving (Eq, Show)
+
+-- | Birth registration information
+data BirthInfo = BirthInfo
+  with
+    fullName : Text
+    dateOfBirth : Date
+    placeOfBirth : Text
+    sex : Sex
+    motherName : Text
+    fatherName : Text
+    registrationNumber : Text
+  deriving (Eq, Show)
+
+-- | Status of a birth certificate
+data BirthCertStatus
+  = Active
+  | Amended
+  | Voided
+  deriving (Eq, Show)
+
+-- | Request to register a birth with the civil registry
+template BirthRegistrationRequest
+  with
+    requester : Party
+    registry : Party
+    birthInfo : BirthInfo
+  where
+    signatory requester
+    observer registry
+
+    choice Approve : ContractId BirthCertificate
+      controller registry
+      do
+        create BirthCertificate with
+          registry
+          holder = requester
+          birthInfo
+          status = Active
+
+    choice Reject : ()
+      controller registry
+      do pure ()
+
+    choice WithdrawRequest : ()
+      controller requester
+      do pure ()
+
+-- | An issued birth certificate
+template BirthCertificate
+  with
+    registry : Party
+    holder : Party
+    birthInfo : BirthInfo
+    status : BirthCertStatus
+  where
+    signatory registry, holder
+
+    choice Void : ()
+      controller registry
+      do pure ()
+
+    nonconsuming choice RequestAmendment : ContractId AmendmentRequest
+      with
+        updatedBirthInfo : BirthInfo
+      controller holder
+      do
+        create AmendmentRequest with
+          holder
+          registry
+          certificateCid = self
+          updatedBirthInfo
+
+-- | Request to amend a birth certificate
+template AmendmentRequest
+  with
+    holder : Party
+    registry : Party
+    certificateCid : ContractId BirthCertificate
+    updatedBirthInfo : BirthInfo
+  where
+    signatory holder
+    observer registry
+
+    choice ApproveAmendment : ContractId BirthCertificate
+      controller registry
+      do
+        archive certificateCid
+        create BirthCertificate with
+          registry
+          holder
+          birthInfo = updatedBirthInfo
+          status = Amended
+
+    choice RejectAmendment : ()
+      controller registry
+      do pure ()
+
+    choice WithdrawAmendment : ()
+      controller holder
+      do pure ()

@@ -1,0 +1,139 @@
+module Test.BirthCertificateTest where
+
+import Daml.Script
+import DA.Date (date, Month(..))
+import DA.Optional (isNone)
+
+import Civil.BirthCertificate
+
+-- | Test 1: Full lifecycle — request → approve → certificate exists
+testBirthCertificateLifecycle : Script ()
+testBirthCertificateLifecycle = do
+  civilRegistry <- allocatePartyByHint (PartyIdHint "civil-registry")
+  alice <- allocatePartyByHint (PartyIdHint "alice")
+
+  let birthInfo = BirthInfo with
+        fullName = "Alice Johnson"
+        dateOfBirth = date 1990 Jan 15
+        placeOfBirth = "New York, USA"
+        sex = Female
+        motherName = "Mary Johnson"
+        fatherName = "John Johnson"
+        registrationNumber = "BC-2024-001"
+
+  -- Alice requests birth certificate
+  reqCid <- submit alice do
+    createCmd BirthRegistrationRequest with
+      requester = alice
+      registry = civilRegistry
+      birthInfo
+
+  -- Registry approves
+  certCid <- submit civilRegistry do
+    exerciseCmd reqCid Approve
+
+  -- Verify certificate exists and is Active
+  cert <- queryContractId alice certCid
+  case cert of
+    None -> abort "Birth certificate should exist"
+    Some c -> do
+      assertMsg "Status should be Active" (c.status == Active)
+      assertMsg "Holder should be Alice" (c.holder == alice)
+      assertMsg "Name should match" (c.birthInfo.fullName == "Alice Johnson")
+
+  pure ()
+
+-- | Test 2: Amendment workflow — request amendment → approve → updated info
+testBirthCertificateAmendment : Script ()
+testBirthCertificateAmendment = do
+  civilRegistry <- allocatePartyByHint (PartyIdHint "civil-registry")
+  alice <- allocatePartyByHint (PartyIdHint "alice")
+
+  let birthInfo = BirthInfo with
+        fullName = "Alice Johnson"
+        dateOfBirth = date 1990 Jan 15
+        placeOfBirth = "New York, USA"
+        sex = Female
+        motherName = "Mary Johnson"
+        fatherName = "John Johnson"
+        registrationNumber = "BC-2024-001"
+
+  -- Create birth certificate
+  reqCid <- submit alice do
+    createCmd BirthRegistrationRequest with
+      requester = alice
+      registry = civilRegistry
+      birthInfo
+
+  certCid <- submit civilRegistry do
+    exerciseCmd reqCid Approve
+
+  -- Alice requests amendment (name change)
+  let updatedInfo = birthInfo with fullName = "Alice Smith"
+
+  amendReqCid <- submit alice do
+    exerciseCmd certCid RequestAmendment with
+      updatedBirthInfo = updatedInfo
+
+  -- Registry approves amendment
+  newCertCid <- submit civilRegistry do
+    exerciseCmd amendReqCid ApproveAmendment
+
+  -- Verify updated certificate
+  newCert <- queryContractId alice newCertCid
+  case newCert of
+    None -> abort "Amended certificate should exist"
+    Some c -> do
+      assertMsg "Status should be Amended" (c.status == Amended)
+      assertMsg "Name should be updated" (c.birthInfo.fullName == "Alice Smith")
+
+  -- Verify old certificate is gone
+  oldCert <- queryContractId alice certCid
+  assertMsg "Old certificate should be archived" (isNone (oldCert : Optional BirthCertificate))
+
+  pure ()
+
+-- | Test 3: Negative cases — unauthorized approval, void by non-registry, double void
+testBirthCertificateNegativeCases : Script ()
+testBirthCertificateNegativeCases = do
+  civilRegistry <- allocatePartyByHint (PartyIdHint "civil-registry")
+  alice <- allocatePartyByHint (PartyIdHint "alice")
+  bob <- allocatePartyByHint (PartyIdHint "bob")
+
+  let birthInfo = BirthInfo with
+        fullName = "Alice Johnson"
+        dateOfBirth = date 1990 Jan 15
+        placeOfBirth = "New York, USA"
+        sex = Female
+        motherName = "Mary Johnson"
+        fatherName = "John Johnson"
+        registrationNumber = "BC-2024-001"
+
+  -- Create request
+  reqCid <- submit alice do
+    createCmd BirthRegistrationRequest with
+      requester = alice
+      registry = civilRegistry
+      birthInfo
+
+  -- Negative: Bob cannot approve (not the registry)
+  submitMustFail bob do
+    exerciseCmd reqCid Approve
+
+  -- Registry approves
+  certCid <- submit civilRegistry do
+    exerciseCmd reqCid Approve
+
+  -- Negative: Alice cannot void her own certificate
+  submitMustFail alice do
+    exerciseCmd certCid Void
+
+  -- Registry voids the certificate
+  submit civilRegistry do
+    exerciseCmd certCid Void
+
+  -- Verify certificate is gone
+  certLookup <- queryContractId civilRegistry certCid
+  assertMsg "Voided certificate should not exist" (isNone (certLookup : Optional BirthCertificate))
+
+  pure ()

@@ -1,0 +1,5 @@
+/.daml
+/log
+navigator.log
+node_modules
+ui/dist

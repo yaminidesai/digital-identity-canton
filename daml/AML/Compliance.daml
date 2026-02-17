@@ -1,0 +1,128 @@
+module AML.Compliance where
+
+import Identity.Types (PersonalInfo)
+
+-- | KYC data submitted by a customer
+data KYCData = KYCData
+  with
+    personalInfo : PersonalInfo
+    address : Text
+    taxId : Text
+    sourceOfFunds : Text
+    occupation : Text
+  deriving (Eq, Show)
+
+-- | Risk assessment level
+data RiskLevel
+  = Low
+  | Medium
+  | High
+  | Critical
+  deriving (Eq, Show)
+
+-- | Status of compliance check
+data ComplianceStatus
+  = Pending
+  | Cleared
+  | Flagged
+  | Rejected
+  deriving (Eq, Show)
+
+-- | Institution requests KYC from a customer
+template KYCRequest
+  with
+    institution : Party
+    customer : Party
+    purpose : Text
+  where
+    signatory institution
+    observer customer
+
+    choice ProvideKYC : ContractId KYCSubmission
+      with
+        kycData : KYCData
+      controller customer
+      do
+        create KYCSubmission with
+          institution
+          customer
+          kycData
+
+    choice Decline : ()
+      controller customer
+      do pure ()
+
+    choice WithdrawKYC : ()
+      controller institution
+      do pure ()
+
+-- | KYC data submitted by customer, awaiting institution review
+template KYCSubmission
+  with
+    institution : Party
+    customer : Party
+    kycData : KYCData
+  where
+    signatory customer
+    observer institution
+
+    choice ApproveKYC : ContractId KYCClearance
+      with
+        riskLevel : RiskLevel
+      controller institution
+      do
+        create KYCClearance with
+          institution
+          customer
+          kycData
+          riskLevel
+
+    choice FlagKYC : ContractId SuspiciousActivityReport
+      with
+        regulator : Party
+      controller institution
+      do
+        create SuspiciousActivityReport with
+          institution
+          customer
+          kycData
+          regulator
+          reason = "Flagged during KYC review"
+
+    choice RejectKYC : ()
+      controller institution
+      do pure ()
+
+-- | Active KYC clearance for a customer at an institution
+template KYCClearance
+  with
+    institution : Party
+    customer : Party
+    kycData : KYCData
+    riskLevel : RiskLevel
+  where
+    signatory institution, customer
+
+    choice RevokeClearance : ()
+      controller institution
+      do pure ()
+
+-- | Suspicious activity report filed by an institution
+template SuspiciousActivityReport
+  with
+    institution : Party
+    customer : Party
+    kycData : KYCData
+    regulator : Party
+    reason : Text
+  where
+    signatory institution
+    observer regulator
+
+    choice Acknowledge : ()
+      controller regulator
+      do pure ()
+
+    choice Escalate : ()
+      controller regulator
+      do pure ()

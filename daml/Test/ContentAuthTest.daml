@@ -1,0 +1,155 @@
+module Test.ContentAuthTest where
+
+import Daml.Script
+import DA.Date (date, Month(..))
+import DA.Optional (isSome)
+
+import Content.ContentAuth
+
+-- | Test 1: Content registration & licensing
+testContentRegistrationAndLicensing : Script ()
+testContentRegistrationAndLicensing = do
+  registry <- allocatePartyByHint (PartyIdHint "content-registry")
+  alice <- allocatePartyByHint (PartyIdHint "alice")
+  bob <- allocatePartyByHint (PartyIdHint "bob")
+
+  let contentInfo = ContentInfo with
+        title = "My Digital Artwork"
+        contentHash = "sha256:artwork_hash_001"
+        contentType = Image
+        creator = alice
+        creationDate = date 2024 Jan 1
+        description = "Original digital painting"
+
+  -- Alice registers content
+  regReqCid <- submit alice do
+    createCmd ContentRegistrationRequest with
+      creator = alice
+      registry
+      contentInfo
+
+  -- Registry approves
+  certCid <- submit registry do
+    exerciseCmd regReqCid ApproveRegistration
+
+  -- Verify certificate exists
+  cert <- queryContractId alice certCid
+  case cert of
+    None -> abort "Content certificate should exist"
+    Some c -> do
+      assertMsg "Status should be Registered" (c.status == Registered)
+      assertMsg "Creator should be Alice" (c.creator == alice)
+
+  -- Alice creates a license request for Bob
+  let terms = LicenseTerms with
+        licensee = bob
+        startDate = date 2024 Feb 1
+        endDate = date 2025 Feb 1
+        scope = "Commercial use in marketing materials"
+
+  licReqCid <- submit alice do
+    exerciseCmd certCid RequestLicense with
+      licensee = bob
+      terms
+
+  -- Bob approves the license
+  licCid <- submit bob do
+    exerciseCmd licReqCid ApproveLicense
+
+  -- Verify license exists
+  lic <- queryContractId bob licCid
+  case lic of
+    None -> abort "License agreement should exist"
+    Some l -> do
+      assertMsg "Licensee should be Bob" (l.licensee == bob)
+      assertMsg "Content hash should match" (l.contentHash == "sha256:artwork_hash_001")
+
+  pure ()
+
+-- | Test 2: Dispute resolution
+testDisputeResolution : Script ()
+testDisputeResolution = do
+  registry <- allocatePartyByHint (PartyIdHint "content-registry")
+  alice <- allocatePartyByHint (PartyIdHint "alice")
+  bob <- allocatePartyByHint (PartyIdHint "bob")
+
+  let contentInfo = ContentInfo with
+        title = "Disputed Photo"
+        contentHash = "sha256:photo_hash_001"
+        contentType = Image
+        creator = alice
+        creationDate = date 2024 Jan 1
+        description = "A landscape photograph"
+
+  -- Alice registers content
+  regReqCid <- submit alice do
+    createCmd ContentRegistrationRequest with
+      creator = alice
+      registry
+      contentInfo
+
+  certCid <- submit registry do
+    exerciseCmd regReqCid ApproveRegistration
+
+  -- Bob disputes ownership
+  disputeCid <- submit bob do
+    createCmd ContentDispute with
+      challenger = bob
+      registry
+      currentOwner = alice
+      contentHash = "sha256:photo_hash_001"
+      reason = "I am the original photographer"
+
+  -- Registry resolves for challenger (Bob), passing the certCid
+  newCertCid <- submit registry do
+    exerciseCmd disputeCid ResolveForChallenger with
+      certCid
+
+  -- Verify new certificate is owned by Bob
+  newCert <- queryContractId registry newCertCid
+  case newCert of
+    None -> abort "New certificate should exist"
+    Some c -> do
+      assertMsg "Creator should be Bob" (c.creator == bob)
+
+  -- Verify certificate exists via CID
+  certLookup <- queryContractId registry newCertCid
+  assertMsg "Certificate should exist under new owner" (isSome certLookup)
+
+  pure ()
+
+-- | Test 3: Negative cases — unauthorized transfer
+testContentNegativeCases : Script ()
+testContentNegativeCases = do
+  registry <- allocatePartyByHint (PartyIdHint "content-registry")
+  alice <- allocatePartyByHint (PartyIdHint "alice")
+  bob <- allocatePartyByHint (PartyIdHint "bob")
+
+  let contentInfo = ContentInfo with
+        title = "Original Work"
+        contentHash = "sha256:unique_hash_001"
+        contentType = Article
+        creator = alice
+        creationDate = date 2024 Jan 1
+        description = "An original article"
+
+  -- Alice registers content
+  regReqCid <- submit alice do
+    createCmd ContentRegistrationRequest with
+      creator = alice
+      registry
+      contentInfo
+
+  certCid <- submit registry do
+    exerciseCmd regReqCid ApproveRegistration
+
+  -- Negative: Bob cannot transfer Alice's content
+  submitMustFail bob do
+    exerciseCmd certCid TransferOwnership with
+      newOwner = bob
+
+  -- Negative: Bob cannot revoke Alice's certificate
+  submitMustFail bob do
+    exerciseCmd certCid Revoke
+
+  pure ()

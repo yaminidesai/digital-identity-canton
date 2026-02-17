@@ -1,0 +1,152 @@
+module Test.AMLTest where
+
+import Daml.Script
+import DA.Date (date, Month(..))
+import DA.Optional (isSome, isNone)
+
+import Identity.Types
+import AML.Compliance
+
+-- | Test 1: KYC workflow — bank requests → customer provides → bank clears
+testKYCWorkflow : Script ()
+testKYCWorkflow = do
+  bankKYC <- allocatePartyByHint (PartyIdHint "bank-kyc")
+  alice <- allocatePartyByHint (PartyIdHint "alice")
+
+  let kycData = KYCData with
+        personalInfo = PersonalInfo with
+          fullName = "Alice Johnson"
+          dateOfBirth = date 1990 Jan 15
+          nationality = "US"
+        address = "123 Main St, New York, NY"
+        taxId = "SSN-123-45-6789"
+        sourceOfFunds = "Employment"
+        occupation = "Software Engineer"
+
+  -- Bank requests KYC
+  kycReqCid <- submit bankKYC do
+    createCmd KYCRequest with
+      institution = bankKYC
+      customer = alice
+      purpose = "Account opening"
+
+  -- Alice provides KYC data
+  submissionCid <- submit alice do
+    exerciseCmd kycReqCid ProvideKYC with
+      kycData
+
+  -- Bank approves with Low risk
+  clearanceCid <- submit bankKYC do
+    exerciseCmd submissionCid ApproveKYC with
+      riskLevel = Low
+
+  -- Verify clearance exists
+  clearance <- queryContractId alice clearanceCid
+  case clearance of
+    None -> abort "KYC clearance should exist"
+    Some c -> do
+      assertMsg "Risk level should be Low" (c.riskLevel == Low)
+      assertMsg "Customer should be Alice" (c.customer == alice)
+
+  -- Verify lookup via CID works
+  clearanceLookup <- queryContractId bankKYC clearanceCid
+  assertMsg "KYC clearance should be found by CID" (isSome clearanceLookup)
+
+  pure ()
+
+-- | Test 2: SAR filing — bank flags → creates SAR → regulator acknowledges
+testSARFiling : Script ()
+testSARFiling = do
+  bankKYC <- allocatePartyByHint (PartyIdHint "bank-kyc")
+  alice <- allocatePartyByHint (PartyIdHint "alice")
+  regulator <- allocatePartyByHint (PartyIdHint "financial-regulator")
+
+  let kycData = KYCData with
+        personalInfo = PersonalInfo with
+          fullName = "Alice Johnson"
+          dateOfBirth = date 1990 Jan 15
+          nationality = "US"
+        address = "123 Main St, New York, NY"
+        taxId = "SSN-123-45-6789"
+        sourceOfFunds = "Unknown"
+        occupation = "Undisclosed"
+
+  -- Bank requests KYC
+  kycReqCid <- submit bankKYC do
+    createCmd KYCRequest with
+      institution = bankKYC
+      customer = alice
+      purpose = "Account opening"
+
+  -- Alice provides KYC data
+  submissionCid <- submit alice do
+    exerciseCmd kycReqCid ProvideKYC with
+      kycData
+
+  -- Bank flags as suspicious
+  sarCid <- submit bankKYC do
+    exerciseCmd submissionCid FlagKYC with
+      regulator
+
+  -- Regulator acknowledges SAR
+  submit regulator do
+    exerciseCmd sarCid Acknowledge
+
+  pure ()
+
+-- | Test 3: Negative cases — customer can't self-clear, unauthorized revocation
+testAMLNegativeCases : Script ()
+testAMLNegativeCases = do
+  bankKYC <- allocatePartyByHint (PartyIdHint "bank-kyc")
+  alice <- allocatePartyByHint (PartyIdHint "alice")
+  bob <- allocatePartyByHint (PartyIdHint "bob")
+
+  let kycData = KYCData with
+        personalInfo = PersonalInfo with
+          fullName = "Alice Johnson"
+          dateOfBirth = date 1990 Jan 15
+          nationality = "US"
+        address = "123 Main St, New York, NY"
+        taxId = "SSN-123-45-6789"
+        sourceOfFunds = "Employment"
+        occupation = "Software Engineer"
+
+  -- Bank requests KYC
+  kycReqCid <- submit bankKYC do
+    createCmd KYCRequest with
+      institution = bankKYC
+      customer = alice
+      purpose = "Account opening"
+
+  -- Alice provides KYC data
+  submissionCid <- submit alice do
+    exerciseCmd kycReqCid ProvideKYC with
+      kycData
+
+  -- Negative: Customer cannot self-approve
+  submitMustFail alice do
+    exerciseCmd submissionCid ApproveKYC with
+      riskLevel = Low
+
+  -- Bank approves
+  clearanceCid <- submit bankKYC do
+    exerciseCmd submissionCid ApproveKYC with
+      riskLevel = Low
+
+  -- Negative: Alice cannot revoke her own clearance
+  submitMustFail alice do
+    exerciseCmd clearanceCid RevokeClearance
+
+  -- Negative: Bob cannot revoke Alice's clearance
+  submitMustFail bob do
+    exerciseCmd clearanceCid RevokeClearance
+
+  -- Bank can revoke
+  submit bankKYC do
+    exerciseCmd clearanceCid RevokeClearance
+
+  -- Verify clearance is gone via CID
+  clearanceLookup <- queryContractId bankKYC clearanceCid
+  assertMsg "Revoked clearance should not exist" (isNone (clearanceLookup : Optional KYCClearance))
+
+  pure ()

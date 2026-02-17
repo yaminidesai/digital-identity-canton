@@ -1,0 +1,9 @@
+module Identity.Types where
+
+-- | Minimal shared identity fields reused across all modules
+data PersonalInfo = PersonalInfo
+  with
+    fullName : Text
+    dateOfBirth : Date
+    nationality : Text
+  deriving (Eq, Show)

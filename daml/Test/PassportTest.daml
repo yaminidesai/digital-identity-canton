@@ -1,0 +1,396 @@
+module Test.PassportTest where
+
+import Daml.Script
+import DA.Date (date, Month(..))
+import DA.Optional (isSome, isNone)
+
+import Passport.Types
+import Identity.Roles
+import Passport.Passport
+import Passport.Verification
+
+-- | Helper to create standard test parties
+data TestParties = TestParties with
+  usAuthority : Party
+  jpAuthority : Party
+  alice : Party
+  bob : Party
+  airportCheck : Party
+  bankKYC : Party
+
+setupParties : Script TestParties
+setupParties = do
+  usAuthority <- allocatePartyByHint (PartyIdHint "us-authority")
+  jpAuthority <- allocatePartyByHint (PartyIdHint "jp-authority")
+  alice <- allocatePartyByHint (PartyIdHint "alice")
+  bob <- allocatePartyByHint (PartyIdHint "bob")
+  airportCheck <- allocatePartyByHint (PartyIdHint "airport-check")
+  bankKYC <- allocatePartyByHint (PartyIdHint "bank-kyc")
+  pure TestParties with ..
+
+-- | Sample passport info for Alice (US citizen)
+alicePassportInfo : PassportInfo
+alicePassportInfo = PassportInfo with
+  fullName = "Alice Johnson"
+  dateOfBirth = date 1990 Jan 15
+  nationality = "US"
+  passportNumber = "US123456789"
+  photoHash = "sha256:alice_photo_abc123"
+  issueDate = date 2023 Jun 1
+  expiryDate = date 2033 Jun 1
+
+-- | Sample passport info for Bob (Japanese citizen)
+bobPassportInfo : PassportInfo
+bobPassportInfo = PassportInfo with
+  fullName = "Bob Tanaka"
+  dateOfBirth = date 1985 Mar 20
+  nationality = "JP"
+  passportNumber = "JP987654321"
+  photoHash = "sha256:bob_photo_def456"
+  issueDate = date 2022 Sep 15
+  expiryDate = date 2032 Sep 15
+
+-- | Test 1: Full Lifecycle
+testFullLifecycle : Script ()
+testFullLifecycle = do
+  tp <- setupParties
+
+  _usAuthCid <- submit tp.usAuthority do
+    createCmd IssuingAuthority with
+      authority = tp.usAuthority
+      country = "US"
+
+  requestCid <- submit tp.alice do
+    createCmd IdentityRequest with
+      holder = tp.alice
+      authority = tp.usAuthority
+      passportInfo = alicePassportInfo
+
+  passportCid <- submit tp.usAuthority do
+    exerciseCmd requestCid Approve
+
+  passport <- queryContractId tp.alice passportCid
+  case passport of
+    None -> abort "Passport should exist"
+    Some p -> do
+      assertMsg "Status should be Active" (p.status == Active)
+      assertMsg "Holder should be Alice" (p.holder == tp.alice)
+      assertMsg "Authority should be US" (p.authority == tp.usAuthority)
+
+  verReqCid <- submit tp.airportCheck do
+    createCmd VerificationRequest with
+      verifier = tp.airportCheck
+      holder = tp.alice
+      purpose = "Airport immigration check"
+      requestedDisclosure = DisclosurePolicy with
+        discloseName = True
+        discloseDateOfBirth = True
+        discloseNationality = True
+        disclosePassportNumber = True
+        disclosePhotoHash = True
+        discloseIssueDate = False
+        discloseExpiryDate = True
+
+  let fullDisclosure = DisclosurePolicy with
+        discloseName = True
+        discloseDateOfBirth = True
+        discloseNationality = True
+        disclosePassportNumber = True
+        disclosePhotoHash = True
+        discloseIssueDate = True
+        discloseExpiryDate = True
+
+  verRespCid <- submit tp.alice do
+    exerciseCmd verReqCid RespondToVerification with
+      passportInfo = alicePassportInfo
+      holderDisclosure = fullDisclosure
+
+  submit tp.airportCheck do
+    exerciseCmd verRespCid AcknowledgeVerification
+
+  pure ()
+
+-- | Test 2: Multi-Jurisdiction
+testMultiJurisdiction : Script ()
+testMultiJurisdiction = do
+  tp <- setupParties
+
+  submit tp.usAuthority do
+    createCmd IssuingAuthority with
+      authority = tp.usAuthority
+      country = "US"
+
+  submit tp.jpAuthority do
+    createCmd IssuingAuthority with
+      authority = tp.jpAuthority
+      country = "JP"
+
+  aliceReqCid <- submit tp.alice do
+    createCmd IdentityRequest with
+      holder = tp.alice
+      authority = tp.usAuthority
+      passportInfo = alicePassportInfo
+
+  bobReqCid <- submit tp.bob do
+    createCmd IdentityRequest with
+      holder = tp.bob
+      authority = tp.jpAuthority
+      passportInfo = bobPassportInfo
+
+  alicePassportCid <- submit tp.usAuthority do
+    exerciseCmd aliceReqCid Approve
+
+  bobPassportCid <- submit tp.jpAuthority do
+    exerciseCmd bobReqCid Approve
+
+  alicePassport <- queryContractId tp.alice alicePassportCid
+  case alicePassport of
+    None -> abort "Alice's passport should exist"
+    Some p -> assertMsg "Alice nationality should be US" (p.passportInfo.nationality == "US")
+
+  bobPassport <- queryContractId tp.bob bobPassportCid
+  case bobPassport of
+    None -> abort "Bob's passport should exist"
+    Some p -> assertMsg "Bob nationality should be JP" (p.passportInfo.nationality == "JP")
+
+  -- Verify passports exist via CID lookup
+  aliceLookup <- queryContractId tp.alice alicePassportCid
+  assertMsg "Alice passport should exist" (isSome aliceLookup)
+
+  bobLookup <- queryContractId tp.bob bobPassportCid
+  assertMsg "Bob passport should exist" (isSome bobLookup)
+
+  pure ()
+
+-- | Test 3: Selective Disclosure
+testSelectiveDisclosure : Script ()
+testSelectiveDisclosure = do
+  tp <- setupParties
+
+  submit tp.usAuthority do
+    createCmd IssuingAuthority with
+      authority = tp.usAuthority
+      country = "US"
+
+  requestCid <- submit tp.alice do
+    createCmd IdentityRequest with
+      holder = tp.alice
+      authority = tp.usAuthority
+      passportInfo = alicePassportInfo
+
+  submit tp.usAuthority do
+    exerciseCmd requestCid Approve
+
+  verReqCid <- submit tp.bankKYC do
+    createCmd VerificationRequest with
+      verifier = tp.bankKYC
+      holder = tp.alice
+      purpose = "Bank KYC verification"
+      requestedDisclosure = DisclosurePolicy with
+        discloseName = True
+        discloseDateOfBirth = True
+        discloseNationality = True
+        disclosePassportNumber = True
+        disclosePhotoHash = True
+        discloseIssueDate = True
+        discloseExpiryDate = True
+
+  let limitedDisclosure = DisclosurePolicy with
+        discloseName = True
+        discloseDateOfBirth = False
+        discloseNationality = True
+        disclosePassportNumber = False
+        disclosePhotoHash = False
+        discloseIssueDate = False
+        discloseExpiryDate = False
+
+  verRespCid <- submit tp.alice do
+    exerciseCmd verReqCid RespondToVerification with
+      passportInfo = alicePassportInfo
+      holderDisclosure = limitedDisclosure
+
+  verResp <- queryContractId tp.alice verRespCid
+  case verResp of
+    None -> abort "Verification response should exist"
+    Some r -> do
+      assertMsg "Name should be disclosed" (r.disclosedIdentity.fullName == Some "Alice Johnson")
+      assertMsg "Nationality should be disclosed" (r.disclosedIdentity.nationality == Some "US")
+      assertMsg "DOB should not be disclosed" (isNone r.disclosedIdentity.dateOfBirth)
+      assertMsg "Passport number should not be disclosed" (isNone r.disclosedIdentity.passportNumber)
+      assertMsg "Photo hash should not be disclosed" (isNone r.disclosedIdentity.photoHash)
+      assertMsg "Issue date should not be disclosed" (isNone r.disclosedIdentity.issueDate)
+      assertMsg "Expiry date should not be disclosed" (isNone r.disclosedIdentity.expiryDate)
+
+  let disclosed = applyDisclosure limitedDisclosure alicePassportInfo
+  assertMsg "Direct: name disclosed" (disclosed.fullName == Some "Alice Johnson")
+  assertMsg "Direct: nationality disclosed" (disclosed.nationality == Some "US")
+  assertMsg "Direct: DOB not disclosed" (isNone disclosed.dateOfBirth)
+  assertMsg "Direct: passport number not disclosed" (isNone disclosed.passportNumber)
+
+  submit tp.bankKYC do
+    exerciseCmd verRespCid AcknowledgeVerification
+
+  pure ()
+
+-- | Test 4: Update Workflow
+testUpdateWorkflow : Script ()
+testUpdateWorkflow = do
+  tp <- setupParties
+
+  submit tp.usAuthority do
+    createCmd IssuingAuthority with
+      authority = tp.usAuthority
+      country = "US"
+
+  requestCid <- submit tp.alice do
+    createCmd IdentityRequest with
+      holder = tp.alice
+      authority = tp.usAuthority
+      passportInfo = alicePassportInfo
+
+  passportCid <- submit tp.usAuthority do
+    exerciseCmd requestCid Approve
+
+  updateReqCid <- submit tp.alice do
+    exerciseCmd passportCid RequestUpdate with
+      requestedUpdates = UpdateFields with
+        newFullName = Some "Alice Smith"
+        newNationality = None
+        newPhotoHash = Some "sha256:alice_new_photo_xyz789"
+
+  newPassportCid <- submit tp.usAuthority do
+    exerciseCmd updateReqCid ApproveUpdate
+
+  newPassport <- queryContractId tp.alice newPassportCid
+  case newPassport of
+    None -> abort "Updated passport should exist"
+    Some p -> do
+      assertMsg "Name should be updated" (p.passportInfo.fullName == "Alice Smith")
+      assertMsg "Nationality should remain US" (p.passportInfo.nationality == "US")
+      assertMsg "Photo should be updated" (p.passportInfo.photoHash == "sha256:alice_new_photo_xyz789")
+      assertMsg "Status should be Active" (p.status == Active)
+
+  oldPassport <- queryContractId tp.alice passportCid
+  assertMsg "Old passport should be archived" (isNone (oldPassport : Optional DigitalPassport))
+
+  pure ()
+
+-- | Test 5: Revocation
+testRevocation : Script ()
+testRevocation = do
+  tp <- setupParties
+
+  submit tp.usAuthority do
+    createCmd IssuingAuthority with
+      authority = tp.usAuthority
+      country = "US"
+
+  requestCid <- submit tp.alice do
+    createCmd IdentityRequest with
+      holder = tp.alice
+      authority = tp.usAuthority
+      passportInfo = alicePassportInfo
+
+  passportCid <- submit tp.usAuthority do
+    exerciseCmd requestCid Approve
+
+  suspendedCid <- submit tp.usAuthority do
+    exerciseCmd passportCid Suspend
+
+  suspendedPassport <- queryContractId tp.alice suspendedCid
+  case suspendedPassport of
+    None -> abort "Suspended passport should exist"
+    Some p -> assertMsg "Status should be Suspended" (p.status == Suspended)
+
+  reactivatedCid <- submit tp.usAuthority do
+    exerciseCmd suspendedCid Reactivate
+
+  reactivatedPassport <- queryContractId tp.alice reactivatedCid
+  case reactivatedPassport of
+    None -> abort "Reactivated passport should exist"
+    Some p -> assertMsg "Status should be Active again" (p.status == Active)
+
+  submit tp.usAuthority do
+    exerciseCmd reactivatedCid Revoke
+
+  -- Verify revoked passport is gone via CID
+  passportLookup <- queryContractId tp.usAuthority reactivatedCid
+  assertMsg "Revoked passport should not exist" (isNone (passportLookup : Optional DigitalPassport))
+
+  pure ()
+
+-- | Test 6: Negative Cases
+testNegativeCases : Script ()
+testNegativeCases = do
+  tp <- setupParties
+
+  submit tp.usAuthority do
+    createCmd IssuingAuthority with
+      authority = tp.usAuthority
+      country = "US"
+
+  submit tp.jpAuthority do
+    createCmd IssuingAuthority with
+      authority = tp.jpAuthority
+      country = "JP"
+
+  requestCid <- submit tp.alice do
+    createCmd IdentityRequest with
+      holder = tp.alice
+      authority = tp.usAuthority
+      passportInfo = alicePassportInfo
+
+  passportCid <- submit tp.usAuthority do
+    exerciseCmd requestCid Approve
+
+  aliceJPReqCid <- submit tp.alice do
+    createCmd IdentityRequest with
+      holder = tp.alice
+      authority = tp.usAuthority
+      passportInfo = alicePassportInfo
+
+  submitMustFail tp.jpAuthority do
+    exerciseCmd aliceJPReqCid Approve
+
+  submitMustFail tp.alice do
+    exerciseCmd passportCid Revoke
+
+  submitMustFail tp.alice do
+    exerciseCmd passportCid Suspend
+
+  suspendedCid <- submit tp.usAuthority do
+    exerciseCmd passportCid Suspend
+
+  submitMustFail tp.usAuthority do
+    exerciseCmd suspendedCid Suspend
+
+  submitMustFail tp.jpAuthority do
+    exerciseCmd suspendedCid Reactivate
+
+  verReqCid <- submit tp.airportCheck do
+    createCmd VerificationRequest with
+      verifier = tp.airportCheck
+      holder = tp.alice
+      purpose = "Test"
+      requestedDisclosure = DisclosurePolicy with
+        discloseName = True
+        discloseDateOfBirth = False
+        discloseNationality = False
+        disclosePassportNumber = False
+        disclosePhotoHash = False
+        discloseIssueDate = False
+        discloseExpiryDate = False
+
+  submitMustFail tp.airportCheck do
+    exerciseCmd verReqCid RespondToVerification with
+      passportInfo = alicePassportInfo
+      holderDisclosure = DisclosurePolicy with
+        discloseName = True
+        discloseDateOfBirth = False
+        discloseNationality = False
+        disclosePassportNumber = False
+        disclosePhotoHash = False
+        discloseIssueDate = False
+        discloseExpiryDate = False
+
+  pure ()

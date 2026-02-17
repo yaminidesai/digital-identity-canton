@@ -1,0 +1,100 @@
+module Passport.Passport where
+
+import DA.Optional (fromOptional)
+import Passport.Types
+
+-- | A citizen's request to an issuing authority for a digital passport.
+template IdentityRequest
+  with
+    holder : Party
+    authority : Party
+    passportInfo : PassportInfo
+  where
+    signatory holder
+    observer authority
+
+    choice Approve : ContractId DigitalPassport
+      controller authority
+      do
+        create DigitalPassport with
+          authority
+          holder
+          passportInfo
+          status = Active
+
+    choice Reject : ()
+      controller authority
+      do pure ()
+
+    choice Withdraw : ()
+      controller holder
+      do pure ()
+
+-- | A digital passport issued by an authority to a holder.
+template DigitalPassport
+  with
+    authority : Party
+    holder : Party
+    passportInfo : PassportInfo
+    status : PassportStatus
+  where
+    signatory authority, holder
+
+    choice Revoke : ()
+      controller authority
+      do
+        assertMsg "Can only revoke an Active or Suspended passport" (status /= Revoked)
+        pure ()
+
+    choice Suspend : ContractId DigitalPassport
+      controller authority
+      do
+        assertMsg "Can only suspend an Active passport" (status == Active)
+        create this with status = Suspended
+
+    choice Reactivate : ContractId DigitalPassport
+      controller authority
+      do
+        assertMsg "Can only reactivate a Suspended passport" (status == Suspended)
+        create this with status = Active
+
+    nonconsuming choice RequestUpdate : ContractId UpdateRequest
+      with
+        requestedUpdates : UpdateFields
+      controller holder
+      do
+        create UpdateRequest with
+          holder
+          authority
+          passportCid = self
+          updateFields = requestedUpdates
+
+-- | A holder's request to update passport fields, pending authority approval.
+template UpdateRequest
+  with
+    holder : Party
+    authority : Party
+    passportCid : ContractId DigitalPassport
+    updateFields : UpdateFields
+  where
+    signatory holder
+    observer authority
+
+    choice ApproveUpdate : ContractId DigitalPassport
+      controller authority
+      do
+        passport <- fetch passportCid
+        archive passportCid
+        let updatedInfo = passport.passportInfo with
+              fullName = fromOptional passport.passportInfo.fullName updateFields.newFullName
+              nationality = fromOptional passport.passportInfo.nationality updateFields.newNationality
+              photoHash = fromOptional passport.passportInfo.photoHash updateFields.newPhotoHash
+        create passport with passportInfo = updatedInfo
+
+    choice RejectUpdate : ()
+      controller authority
+      do pure ()
+
+    choice WithdrawUpdate : ()
+      controller holder
+      do pure ()

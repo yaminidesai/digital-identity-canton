@@ -1,0 +1,63 @@
+module Passport.Types where
+
+-- | Core passport information issued by an authority
+data PassportInfo = PassportInfo
+  with
+    fullName : Text
+    dateOfBirth : Date
+    nationality : Text
+    passportNumber : Text
+    photoHash : Text
+    issueDate : Date
+    expiryDate : Date
+  deriving (Eq, Show)
+
+-- | Status of a digital passport
+data PassportStatus
+  = Active
+  | Suspended
+  | Revoked
+  deriving (Eq, Show)
+
+-- | Per-field boolean flags controlling what to disclose
+data DisclosurePolicy = DisclosurePolicy
+  with
+    discloseName : Bool
+    discloseDateOfBirth : Bool
+    discloseNationality : Bool
+    disclosePassportNumber : Bool
+    disclosePhotoHash : Bool
+    discloseIssueDate : Bool
+    discloseExpiryDate : Bool
+  deriving (Eq, Show)
+
+-- | Identity fields after selective disclosure — undisclosed fields are None
+data DisclosedIdentity = DisclosedIdentity
+  with
+    fullName : Optional Text
+    dateOfBirth : Optional Date
+    nationality : Optional Text
+    passportNumber : Optional Text
+    photoHash : Optional Text
+    issueDate : Optional Date
+    expiryDate : Optional Date
+  deriving (Eq, Show)
+
+-- | Optional new values for an update request
+data UpdateFields = UpdateFields
+  with
+    newFullName : Optional Text
+    newNationality : Optional Text
+    newPhotoHash : Optional Text
+  deriving (Eq, Show)
+
+-- | Filter PassportInfo through a DisclosurePolicy, producing DisclosedIdentity
+applyDisclosure : DisclosurePolicy -> PassportInfo -> DisclosedIdentity
+applyDisclosure policy info = DisclosedIdentity with
+  fullName = if policy.discloseName then Some info.fullName else None
+  dateOfBirth = if policy.discloseDateOfBirth then Some info.dateOfBirth else None
+  nationality = if policy.discloseNationality then Some info.nationality else None
+  passportNumber = if policy.disclosePassportNumber then Some info.passportNumber else None
+  photoHash = if policy.disclosePhotoHash then Some info.photoHash else None
+  issueDate = if policy.discloseIssueDate then Some info.issueDate else None
+  expiryDate = if policy.discloseExpiryDate then Some info.expiryDate else None

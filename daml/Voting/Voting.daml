@@ -1,0 +1,133 @@
+module Voting.Voting where
+
+import Identity.Types (PersonalInfo)
+
+
+-- | Voter information for registration
+data VoterInfo = VoterInfo
+  with
+    personalInfo : PersonalInfo
+    constituency : Text
+    voterIdNumber : Text
+  deriving (Eq, Show)
+
+-- | Status of an election
+data ElectionStatus
+  = Open
+  | Closed
+  deriving (Eq, Show)
+
+-- | Request to register as a voter
+template VoterRegistrationRequest
+  with
+    voter : Party
+    commission : Party
+    voterInfo : VoterInfo
+  where
+    signatory voter
+    observer commission
+
+    choice ApproveRegistration : ContractId VoterRegistration
+      controller commission
+      do
+        create VoterRegistration with
+          commission
+          voter
+          voterInfo
+
+    choice RejectRegistration : ()
+      controller commission
+      do pure ()
+
+    choice WithdrawRegistration : ()
+      controller voter
+      do pure ()
+
+-- | An approved voter registration
+template VoterRegistration
+  with
+    commission : Party
+    voter : Party
+    voterInfo : VoterInfo
+  where
+    signatory commission, voter
+
+    choice Deregister : ()
+      controller commission
+      do pure ()
+
+-- | An election created by the election commission
+template Election
+  with
+    commission : Party
+    electionId : Text
+    description : Text
+    candidates : [Text]
+    status : ElectionStatus
+    voters : [Party]
+  where
+    signatory commission
+
+    choice CastBallot : (ContractId Election, ContractId Ballot)
+      with
+        voter : Party
+        voterRegCid : ContractId VoterRegistration
+        choice_ : Text
+      controller voter
+      do
+        -- Verify voter is registered
+        reg <- fetch voterRegCid
+        assertMsg "Voter registration does not match" (reg.voter == voter)
+        assertMsg "Voter registration commission does not match" (reg.commission == commission)
+        -- Verify election is open
+        assertMsg "Election must be open" (status == Open)
+        -- Enforce one-person-one-vote
+        assertMsg "Voter has already cast a ballot" (notElem voter voters)
+        -- Create ballot
+        ballotCid <- create Ballot with
+          commission
+          electionId
+          voter
+          choice_ = choice_
+        -- Recreate election with voter added to list
+        newElectionCid <- create this with voters = voter :: voters
+        pure (newElectionCid, ballotCid)
+
+    choice CloseElection : ContractId Election
+      controller commission
+      do
+        assertMsg "Election must be open to close" (status == Open)
+        create this with status = Closed
+
+    choice PublishResult : ContractId ElectionResult
+      with
+        results : Text
+      controller commission
+      do
+        create ElectionResult with
+          commission
+          electionId
+          results
+
+-- | An immutable ballot cast by a voter
+template Ballot
+  with
+    commission : Party
+    electionId : Text
+    voter : Party
+    choice_ : Text
+  where
+    signatory commission, voter
+
+-- | Published election results
+template ElectionResult
+  with
+    commission : Party
+    electionId : Text
+    results : Text
+  where
+    signatory commission
+
+    choice AcknowledgeResult : ()
+      controller commission
+      do pure ()

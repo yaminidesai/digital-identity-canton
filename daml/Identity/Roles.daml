@@ -1,0 +1,41 @@
+module Identity.Roles where
+
+-- | Government body authorized to issue passports for a country
+template IssuingAuthority
+  with
+    authority : Party
+    country : Text
+  where
+    signatory authority
+
+-- | Civil registry authorized to issue birth certificates
+template CivilRegistryAuthority
+  with
+    authority : Party
+    jurisdiction : Text
+  where
+    signatory authority
+
+-- | Election commission authorized to run elections
+template ElectionCommission
+  with
+    authority : Party
+    jurisdiction : Text
+  where
+    signatory authority
+
+-- | Financial regulator overseeing AML/KYC compliance
+template FinancialRegulator
+  with
+    authority : Party
+    jurisdiction : Text
+  where
+    signatory authority
+
+-- | Content authentication registry
+template ContentRegistry
+  with
+    authority : Party
+    domain : Text
+  where
+    signatory authority

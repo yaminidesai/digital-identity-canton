@@ -1,0 +1,173 @@
+module Content.ContentAuth where
+
+-- | Type of digital content
+data ContentType
+  = Article
+  | Image
+  | Video
+  | Audio
+  | Software
+  deriving (Eq, Show)
+
+-- | Status of a content certificate
+data ContentStatus
+  = Registered
+  | Disputed
+  | Revoked
+  deriving (Eq, Show)
+
+-- | Information about a piece of digital content
+data ContentInfo = ContentInfo
+  with
+    title : Text
+    contentHash : Text
+    contentType : ContentType
+    creator : Party
+    creationDate : Date
+    description : Text
+  deriving (Eq, Show)
+
+-- | Terms for a content license
+data LicenseTerms = LicenseTerms
+  with
+    licensee : Party
+    startDate : Date
+    endDate : Date
+    scope : Text
+  deriving (Eq, Show)
+
+-- | Request to register content with the registry
+template ContentRegistrationRequest
+  with
+    creator : Party
+    registry : Party
+    contentInfo : ContentInfo
+  where
+    signatory creator
+    observer registry
+
+    choice ApproveRegistration : ContractId ContentCertificate
+      controller registry
+      do
+        create ContentCertificate with
+          registry
+          creator
+          contentInfo
+          status = Registered
+
+    choice RejectRegistration : ()
+      controller registry
+      do pure ()
+
+    choice WithdrawRegistration : ()
+      controller creator
+      do pure ()
+
+-- | A certificate proving content ownership/authenticity
+-- Registry is sole signatory so it can manage lifecycle (disputes, transfers)
+-- Creator is observer and controls licensing choices
+template ContentCertificate
+  with
+    registry : Party
+    creator : Party
+    contentInfo : ContentInfo
+    status : ContentStatus
+  where
+    signatory registry
+    observer creator
+
+    choice Revoke : ()
+      controller registry
+      do pure ()
+
+    nonconsuming choice RequestLicense : ContractId LicenseRequest
+      with
+        licensee : Party
+        terms : LicenseTerms
+      controller creator
+      do
+        create LicenseRequest with
+          creator
+          licensee
+          registry
+          contentHash = contentInfo.contentHash
+          terms
+
+    choice TransferOwnership : ContractId ContentCertificate
+      with
+        newOwner : Party
+      controller creator
+      do
+        create this with
+          creator = newOwner
+          contentInfo = contentInfo with creator = newOwner
+
+-- | Request for a license to use content
+template LicenseRequest
+  with
+    creator : Party
+    licensee : Party
+    registry : Party
+    contentHash : Text
+    terms : LicenseTerms
+  where
+    signatory creator
+    observer licensee
+
+    choice ApproveLicense : ContractId LicenseAgreement
+      controller licensee
+      do
+        create LicenseAgreement with
+          creator
+          licensee
+          contentHash
+          terms
+
+    choice RejectLicense : ()
+      controller creator
+      do pure ()
+
+    choice WithdrawLicense : ()
+      controller creator
+      do pure ()
+
+-- | An active license agreement for content
+template LicenseAgreement
+  with
+    creator : Party
+    licensee : Party
+    contentHash : Text
+    terms : LicenseTerms
+  where
+    signatory creator, licensee
+
+    choice Terminate : ()
+      controller creator
+      do pure ()
+
+-- | A dispute over content ownership
+template ContentDispute
+  with
+    challenger : Party
+    registry : Party
+    currentOwner : Party
+    contentHash : Text
+    reason : Text
+  where
+    signatory challenger
+    observer registry, currentOwner
+
+    choice ResolveForOwner : ()
+      controller registry
+      do pure ()
+
+    choice ResolveForChallenger : ContractId ContentCertificate
+      with
+        certCid : ContractId ContentCertificate
+      controller registry
+      do
+        cert <- fetch certCid
+        archive certCid
+        create cert with
+          creator = challenger
+          contentInfo = cert.contentInfo with creator = challenger

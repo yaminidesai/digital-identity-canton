@@ -1,0 +1,370 @@
+module Test.IntegrationTest where
+
+import Daml.Script
+import DA.Date (date, Month(..))
+import DA.Optional (isSome)
+
+import Identity.Types
+import Identity.Roles
+import Civil.BirthCertificate qualified as BC
+import Civil.BirthCertificate (BirthRegistrationRequest(..), BirthInfo(..), Sex(..))
+import Passport.Types
+import Passport.Passport qualified as PP
+import Passport.Passport (IdentityRequest(..))
+import Voting.Voting qualified as V
+import Voting.Voting (VoterRegistrationRequest(..), VoterInfo(..), Election(..), ElectionStatus(..), CastBallot(..))
+import AML.Compliance
+import Content.ContentAuth qualified as CC
+import Content.ContentAuth (ContentRegistrationRequest(..), ContentInfo(..), ContentType(..))
+
+-- | Test 1: Birth cert → passport
+-- Person gets birth certificate, then uses identity to get passport
+testBirthCertToPassport : Script ()
+testBirthCertToPassport = do
+  civilRegistry <- allocatePartyByHint (PartyIdHint "civil-registry")
+  usAuthority <- allocatePartyByHint (PartyIdHint "us-authority")
+  alice <- allocatePartyByHint (PartyIdHint "alice")
+
+  -- Setup authorities
+  submit civilRegistry do
+    createCmd CivilRegistryAuthority with
+      authority = civilRegistry
+      jurisdiction = "US"
+
+  submit usAuthority do
+    createCmd IssuingAuthority with
+      authority = usAuthority
+      country = "US"
+
+  -- Step 1: Register birth
+  let birthInfo = BirthInfo with
+        fullName = "Alice Johnson"
+        dateOfBirth = date 1990 Jan 15
+        placeOfBirth = "New York, USA"
+        sex = Female
+        motherName = "Mary Johnson"
+        fatherName = "John Johnson"
+        registrationNumber = "BC-2024-001"
+
+  birthReqCid <- submit alice do
+    createCmd BirthRegistrationRequest with
+      requester = alice
+      registry = civilRegistry
+      birthInfo
+
+  birthCertCid <- submit civilRegistry do
+    exerciseCmd birthReqCid BC.Approve
+
+  -- Verify birth certificate
+  birthCert <- queryContractId alice birthCertCid
+  case birthCert of
+    None -> abort "Birth certificate should exist"
+    Some bc -> assertMsg "Birth cert name should match" (bc.birthInfo.fullName == "Alice Johnson")
+
+  -- Step 2: Use identity from birth cert to request passport
+  let passportInfo = PassportInfo with
+        fullName = birthInfo.fullName
+        dateOfBirth = birthInfo.dateOfBirth
+        nationality = "US"
+        passportNumber = "US123456789"
+        photoHash = "sha256:alice_photo_abc123"
+        issueDate = date 2023 Jun 1
+        expiryDate = date 2033 Jun 1
+
+  passportReqCid <- submit alice do
+    createCmd IdentityRequest with
+      holder = alice
+      authority = usAuthority
+      passportInfo
+
+  passportCid <- submit usAuthority do
+    exerciseCmd passportReqCid PP.Approve
+
+  -- Verify passport exists with matching info
+  passport <- queryContractId alice passportCid
+  case passport of
+    None -> abort "Passport should exist"
+    Some p -> do
+      assertMsg "Passport name should match birth cert" (p.passportInfo.fullName == "Alice Johnson")
+      assertMsg "Passport DOB should match birth cert" (p.passportInfo.dateOfBirth == date 1990 Jan 15)
+
+  pure ()
+
+-- | Test 2: Identity → voter registration
+-- Citizen registers to vote using personal info
+testIdentityToVoterRegistration : Script ()
+testIdentityToVoterRegistration = do
+  usAuthority <- allocatePartyByHint (PartyIdHint "us-authority")
+  commission <- allocatePartyByHint (PartyIdHint "election-commission")
+  alice <- allocatePartyByHint (PartyIdHint "alice")
+
+  -- Setup authorities
+  submit usAuthority do
+    createCmd IssuingAuthority with
+      authority = usAuthority
+      country = "US"
+
+  submit commission do
+    createCmd ElectionCommission with
+      authority = commission
+      jurisdiction = "US"
+
+  -- Step 1: Get passport (establishes identity)
+  let passportInfo = PassportInfo with
+        fullName = "Alice Johnson"
+        dateOfBirth = date 1990 Jan 15
+        nationality = "US"
+        passportNumber = "US123456789"
+        photoHash = "sha256:alice_photo_abc123"
+        issueDate = date 2023 Jun 1
+        expiryDate = date 2033 Jun 1
+
+  passportReqCid <- submit alice do
+    createCmd IdentityRequest with
+      holder = alice
+      authority = usAuthority
+      passportInfo
+
+  submit usAuthority do
+    exerciseCmd passportReqCid PP.Approve
+
+  -- Step 2: Register to vote using identity info from passport
+  let personalInfo = PersonalInfo with
+        fullName = passportInfo.fullName
+        dateOfBirth = passportInfo.dateOfBirth
+        nationality = passportInfo.nationality
+
+  voterRegReqCid <- submit alice do
+    createCmd VoterRegistrationRequest with
+      voter = alice
+      commission
+      voterInfo = VoterInfo with
+        personalInfo
+        constituency = "District 1"
+        voterIdNumber = "V-001"
+
+  voterRegCid <- submit commission do
+    exerciseCmd voterRegReqCid V.ApproveRegistration
+
+  -- Verify voter registration exists via CID
+  voterRegLookup <- queryContractId commission voterRegCid
+  assertMsg "Voter registration should exist" (isSome voterRegLookup)
+
+  -- Step 3: Create and participate in election
+  electionCid <- submit commission do
+    createCmd Election with
+      commission
+      electionId = "2024-GENERAL"
+      description = "2024 General Election"
+      candidates = ["Candidate A", "Candidate B"]
+      status = Open
+      voters = []
+
+  (_, ballotCid) <- submit (actAs alice <> readAs commission) do
+    exerciseCmd electionCid CastBallot with
+      voter = alice
+      voterRegCid = voterRegCid
+      choice_ = "Candidate A"
+
+  -- Verify ballot was cast via CID
+  ballotLookup <- queryContractId alice ballotCid
+  assertMsg "Ballot should exist" (isSome ballotLookup)
+
+  pure ()
+
+-- | Test 3: Identity → KYC
+-- Citizen provides info from passport for bank KYC clearance
+testIdentityToKYC : Script ()
+testIdentityToKYC = do
+  usAuthority <- allocatePartyByHint (PartyIdHint "us-authority")
+  bankKYC <- allocatePartyByHint (PartyIdHint "bank-kyc")
+  alice <- allocatePartyByHint (PartyIdHint "alice")
+
+  -- Setup authority
+  submit usAuthority do
+    createCmd IssuingAuthority with
+      authority = usAuthority
+      country = "US"
+
+  -- Step 1: Get passport
+  let passportInfo = PassportInfo with
+        fullName = "Alice Johnson"
+        dateOfBirth = date 1990 Jan 15
+        nationality = "US"
+        passportNumber = "US123456789"
+        photoHash = "sha256:alice_photo_abc123"
+        issueDate = date 2023 Jun 1
+        expiryDate = date 2033 Jun 1
+
+  passportReqCid <- submit alice do
+    createCmd IdentityRequest with
+      holder = alice
+      authority = usAuthority
+      passportInfo
+
+  submit usAuthority do
+    exerciseCmd passportReqCid PP.Approve
+
+  -- Step 2: Bank requests KYC
+  kycReqCid <- submit bankKYC do
+    createCmd KYCRequest with
+      institution = bankKYC
+      customer = alice
+      purpose = "Account opening"
+
+  -- Step 3: Alice provides KYC data derived from passport info
+  let kycData = KYCData with
+        personalInfo = PersonalInfo with
+          fullName = passportInfo.fullName
+          dateOfBirth = passportInfo.dateOfBirth
+          nationality = passportInfo.nationality
+        address = "123 Main St, New York, NY"
+        taxId = "SSN-123-45-6789"
+        sourceOfFunds = "Employment"
+        occupation = "Software Engineer"
+
+  submissionCid <- submit alice do
+    exerciseCmd kycReqCid ProvideKYC with
+      kycData
+
+  -- Step 4: Bank clears KYC
+  clearanceCid <- submit bankKYC do
+    exerciseCmd submissionCid ApproveKYC with
+      riskLevel = Low
+
+  -- Verify clearance via CID
+  clearanceLookup <- queryContractId bankKYC clearanceCid
+  assertMsg "KYC clearance should exist" (isSome clearanceLookup)
+
+  clearance <- queryContractId alice clearanceCid
+  case clearance of
+    None -> abort "KYC clearance should exist"
+    Some c -> do
+      assertMsg "Name in KYC should match passport" (c.kycData.personalInfo.fullName == "Alice Johnson")
+      assertMsg "Risk level should be Low" (c.riskLevel == Low)
+
+  pure ()
+
+-- | Setup script for sandbox.
+-- Pre-populates the ledger with authorities, passports, birth cert,
+-- voter registration, and an open election so you can explore immediately.
+setup : Script ()
+setup = do
+  -- Allocate all parties
+  usAuthority <- allocatePartyByHint (PartyIdHint "us-authority")
+  jpAuthority <- allocatePartyByHint (PartyIdHint "jp-authority")
+  civilRegistry <- allocatePartyByHint (PartyIdHint "civil-registry")
+  commission <- allocatePartyByHint (PartyIdHint "election-commission")
+  regulator <- allocatePartyByHint (PartyIdHint "financial-regulator")
+  contentReg <- allocatePartyByHint (PartyIdHint "content-registry")
+  alice <- allocatePartyByHint (PartyIdHint "alice")
+  bob <- allocatePartyByHint (PartyIdHint "bob")
+  _airportCheck <- allocatePartyByHint (PartyIdHint "airport-check")
+  bankKYC <- allocatePartyByHint (PartyIdHint "bank-kyc")
+
+  -- Register all authorities
+  submit usAuthority do
+    createCmd IssuingAuthority with authority = usAuthority, country = "US"
+  submit jpAuthority do
+    createCmd IssuingAuthority with authority = jpAuthority, country = "JP"
+  submit civilRegistry do
+    createCmd CivilRegistryAuthority with authority = civilRegistry, jurisdiction = "US"
+  submit commission do
+    createCmd ElectionCommission with authority = commission, jurisdiction = "US"
+  submit regulator do
+    createCmd FinancialRegulator with authority = regulator, jurisdiction = "US"
+  submit contentReg do
+    createCmd ContentRegistry with authority = contentReg, domain = "Global"
+
+  -- Alice: birth certificate
+  let aliceBirthInfo = BirthInfo with
+        fullName = "Alice Johnson"
+        dateOfBirth = date 1990 Jan 15
+        placeOfBirth = "New York, USA"
+        sex = Female
+        motherName = "Mary Johnson"
+        fatherName = "John Johnson"
+        registrationNumber = "BC-2024-001"
+  birthReqCid <- submit alice do
+    createCmd BirthRegistrationRequest with
+      requester = alice, registry = civilRegistry, birthInfo = aliceBirthInfo
+  submit civilRegistry do
+    exerciseCmd birthReqCid BC.Approve
+
+  -- Alice: US passport
+  let alicePassportInfo = PassportInfo with
+        fullName = "Alice Johnson"
+        dateOfBirth = date 1990 Jan 15
+        nationality = "US"
+        passportNumber = "US123456789"
+        photoHash = "sha256:alice_photo_abc123"
+        issueDate = date 2023 Jun 1
+        expiryDate = date 2033 Jun 1
+  alicePassReqCid <- submit alice do
+    createCmd IdentityRequest with
+      holder = alice, authority = usAuthority, passportInfo = alicePassportInfo
+  submit usAuthority do
+    exerciseCmd alicePassReqCid PP.Approve
+
+  -- Bob: JP passport
+  let bobPassportInfo = PassportInfo with
+        fullName = "Bob Tanaka"
+        dateOfBirth = date 1985 Mar 20
+        nationality = "JP"
+        passportNumber = "JP987654321"
+        photoHash = "sha256:bob_photo_def456"
+        issueDate = date 2022 Sep 15
+        expiryDate = date 2032 Sep 15
+  bobPassReqCid <- submit bob do
+    createCmd IdentityRequest with
+      holder = bob, authority = jpAuthority, passportInfo = bobPassportInfo
+  submit jpAuthority do
+    exerciseCmd bobPassReqCid PP.Approve
+
+  -- Alice: voter registration
+  voterRegReqCid <- submit alice do
+    createCmd VoterRegistrationRequest with
+      voter = alice
+      commission
+      voterInfo = VoterInfo with
+        personalInfo = PersonalInfo with
+          fullName = "Alice Johnson"
+          dateOfBirth = date 1990 Jan 15
+          nationality = "US"
+        constituency = "District 1"
+        voterIdNumber = "V-001"
+  submit commission do
+    exerciseCmd voterRegReqCid V.ApproveRegistration
+
+  -- Open election ready for voting
+  submit commission do
+    createCmd Election with
+      commission
+      electionId = "2024-GENERAL"
+      description = "2024 General Election"
+      candidates = ["Candidate A", "Candidate B", "Candidate C"]
+      status = Open
+      voters = []
+
+  -- KYC request waiting for Alice to respond
+  submit bankKYC do
+    createCmd KYCRequest with
+      institution = bankKYC
+      customer = alice
+      purpose = "Account opening"
+
+  -- Alice: content certificate
+  let contentInfo = ContentInfo with
+        title = "Alice's Digital Artwork"
+        contentHash = "sha256:artwork_hash_001"
+        contentType = Image
+        creator = alice
+        creationDate = date 2024 Jan 1
+        description = "Original digital painting"
+  contentReqCid <- submit alice do
+    createCmd ContentRegistrationRequest with
+      creator = alice, registry = contentReg, contentInfo
+  submit contentReg do
+    exerciseCmd contentReqCid CC.ApproveRegistration
+
+  pure ()

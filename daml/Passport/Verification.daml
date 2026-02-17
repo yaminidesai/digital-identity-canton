@@ -1,0 +1,50 @@
+module Passport.Verification where
+
+import Passport.Types
+
+-- | A verifier's request to a passport holder for identity verification.
+template VerificationRequest
+  with
+    verifier : Party
+    holder : Party
+    purpose : Text
+    requestedDisclosure : DisclosurePolicy
+  where
+    signatory verifier
+    observer holder
+
+    choice RespondToVerification : ContractId VerificationResponse
+      with
+        passportInfo : PassportInfo
+        holderDisclosure : DisclosurePolicy
+      controller holder
+      do
+        let disclosed = applyDisclosure holderDisclosure passportInfo
+        create VerificationResponse with
+          holder
+          verifier
+          purpose
+          disclosedIdentity = disclosed
+
+    choice DeclineVerification : ()
+      controller holder
+      do pure ()
+
+    choice WithdrawVerificationRequest : ()
+      controller verifier
+      do pure ()
+
+-- | The result of a verification, containing only the disclosed fields.
+template VerificationResponse
+  with
+    holder : Party
+    verifier : Party
+    purpose : Text
+    disclosedIdentity : DisclosedIdentity
+  where
+    signatory holder
+    observer verifier
+
+    choice AcknowledgeVerification : ()
+      controller verifier
+      do pure ()
