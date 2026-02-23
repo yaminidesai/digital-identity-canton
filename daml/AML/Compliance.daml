@@ -47,6 +47,7 @@ template KYCRequest
           institution
           customer
           kycData
+          status = Pending
 
     choice Decline : ()
       controller customer
@@ -62,6 +63,7 @@ template KYCSubmission
     institution : Party
     customer : Party
     kycData : KYCData
+    status : ComplianceStatus
   where
     signatory customer
     observer institution
@@ -76,6 +78,7 @@ template KYCSubmission
           customer
           kycData
           riskLevel
+          status = Cleared
 
     choice FlagKYC : ContractId SuspiciousActivityReport
       with
@@ -100,10 +103,49 @@ template KYCClearance
     customer : Party
     kycData : KYCData
     riskLevel : RiskLevel
+    status : ComplianceStatus
   where
     signatory institution, customer
 
     choice RevokeClearance : ()
+      controller institution
+      do pure ()
+
+    choice FlagClearance : (ContractId KYCClearance, ContractId SuspiciousActivityReport)
+      with
+        regulator : Party
+      controller institution
+      do
+        newClearanceCid <- create KYCClearance with
+          institution
+          customer
+          kycData
+          riskLevel
+          status = Flagged
+        sarCid <- create SuspiciousActivityReport with
+          institution
+          customer
+          kycData
+          regulator
+          reason = "Clearance flagged post-approval"
+        pure (newClearanceCid, sarCid)
+
+-- | Freeze order issued by a regulator after escalation
+template FreezeOrder
+  with
+    regulator : Party
+    institution : Party
+    customer : Party
+    reason : Text
+  where
+    signatory regulator
+    observer institution, customer
+
+    choice LiftFreeze : ()
+      controller regulator
+      do pure ()
+
+    choice AcknowledgeFreeze : ()
       controller institution
       do pure ()
 
@@ -123,6 +165,55 @@ template SuspiciousActivityReport
       controller regulator
       do pure ()
 
-    choice Escalate : ()
+    choice Escalate : ContractId FreezeOrder
       controller regulator
+      do
+        create FreezeOrder with
+          regulator
+          institution
+          customer
+          reason = "Escalated: " <> reason
+
+-- | Pending asset transfer requiring KYC clearance to execute
+template AssetTransfer
+  with
+    institution : Party
+    sender : Party
+    receiver : Party
+    assetDescription : Text
+    amount : Decimal
+  where
+    signatory institution, sender
+    observer receiver
+
+    choice ExecuteTransfer : ContractId TransferRecord
+      with
+        senderClearanceCid : ContractId KYCClearance
+      controller institution
+      do
+        clearance <- fetch senderClearanceCid
+        assertMsg "Clearance must belong to sender" (clearance.customer == sender)
+        assertMsg "Clearance must be from this institution" (clearance.institution == institution)
+        assertMsg "Clearance must be active (Cleared status)" (clearance.status == Cleared)
+        create TransferRecord with
+          institution
+          sender
+          receiver
+          assetDescription
+          amount
+
+    choice CancelTransfer : ()
+      controller sender
       do pure ()
+
+-- | Immutable record of a completed compliant transfer
+template TransferRecord
+  with
+    institution : Party
+    sender : Party
+    receiver : Party
+    assetDescription : Text
+    amount : Decimal
+  where
+    signatory institution, sender
+    observer receiver

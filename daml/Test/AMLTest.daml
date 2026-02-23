@@ -40,13 +40,14 @@ testKYCWorkflow = do
     exerciseCmd submissionCid ApproveKYC with
       riskLevel = Low
 
-  -- Verify clearance exists
+  -- Verify clearance exists and has correct status
   clearance <- queryContractId alice clearanceCid
   case clearance of
     None -> abort "KYC clearance should exist"
     Some c -> do
       assertMsg "Risk level should be Low" (c.riskLevel == Low)
       assertMsg "Customer should be Alice" (c.customer == alice)
+      assertMsg "Status should be Cleared" (c.status == Cleared)
 
   -- Verify lookup via CID works
   clearanceLookup <- queryContractId bankKYC clearanceCid
@@ -54,7 +55,7 @@ testKYCWorkflow = do
 
   pure ()
 
--- | Test 2: SAR filing — bank flags → creates SAR → regulator acknowledges
+-- | Test 2: SAR filing — bank flags → regulator escalates → FreezeOrder created
 testSARFiling : Script ()
 testSARFiling = do
   bankKYC <- allocatePartyByHint (PartyIdHint "bank-kyc")
@@ -88,9 +89,13 @@ testSARFiling = do
     exerciseCmd submissionCid FlagKYC with
       regulator
 
-  -- Regulator acknowledges SAR
-  submit regulator do
-    exerciseCmd sarCid Acknowledge
+  -- Regulator escalates → creates FreezeOrder
+  freezeCid <- submit regulator do
+    exerciseCmd sarCid Escalate
+
+  -- Verify freeze order exists
+  freeze <- queryContractId regulator freezeCid
+  assertMsg "FreezeOrder should exist after escalation" (isSome freeze)
 
   pure ()
 
@@ -148,5 +153,134 @@ testAMLNegativeCases = do
   -- Verify clearance is gone via CID
   clearanceLookup <- queryContractId bankKYC clearanceCid
   assertMsg "Revoked clearance should not exist" (isNone (clearanceLookup : Optional KYCClearance))
+
+  pure ()
+
+-- | Test 4: Transfer gate happy path — cleared KYC allows transfer to complete
+testTransferGate : Script ()
+testTransferGate = do
+  bank <- allocatePartyByHint (PartyIdHint "bank-gate")
+  alice <- allocatePartyByHint (PartyIdHint "alice-gate")
+  bob <- allocatePartyByHint (PartyIdHint "bob-gate")
+
+  let kycData = KYCData with
+        personalInfo = PersonalInfo with
+          fullName = "Alice Johnson"
+          dateOfBirth = date 1990 Jan 15
+          nationality = "US"
+        address = "123 Main St, New York, NY"
+        taxId = "SSN-123-45-6789"
+        sourceOfFunds = "Employment"
+        occupation = "Software Engineer"
+
+  -- Full KYC workflow for Alice
+  kycReqCid <- submit bank do
+    createCmd KYCRequest with
+      institution = bank
+      customer = alice
+      purpose = "Transfer authorization"
+
+  submissionCid <- submit alice do
+    exerciseCmd kycReqCid ProvideKYC with kycData
+
+  clearanceCid <- submit bank do
+    exerciseCmd submissionCid ApproveKYC with riskLevel = Low
+
+  -- Create asset transfer (both institution and sender must authorize)
+  transferCid <- submit (actAs [bank, alice]) do
+    createCmd AssetTransfer with
+      institution = bank
+      sender = alice
+      receiver = bob
+      assetDescription = "USD wire transfer"
+      amount = 1000.0
+
+  -- Execute transfer using Alice's clearance
+  recordCid <- submit bank do
+    exerciseCmd transferCid ExecuteTransfer with
+      senderClearanceCid = clearanceCid
+
+  -- Verify transfer record was created
+  record <- queryContractId bank recordCid
+  assertMsg "TransferRecord should exist after successful transfer" (isSome record)
+
+  pure ()
+
+-- | Test 5: Transfer gate blocked — flagged or wrong clearance prevents transfer
+testTransferGateBlocked : Script ()
+testTransferGateBlocked = do
+  bank <- allocatePartyByHint (PartyIdHint "bank-blocked")
+  alice <- allocatePartyByHint (PartyIdHint "alice-blocked")
+  bob <- allocatePartyByHint (PartyIdHint "bob-blocked")
+  regulator <- allocatePartyByHint (PartyIdHint "regulator-blocked")
+
+  let aliceKycData = KYCData with
+        personalInfo = PersonalInfo with
+          fullName = "Alice Johnson"
+          dateOfBirth = date 1990 Jan 15
+          nationality = "US"
+        address = "123 Main St, New York, NY"
+        taxId = "SSN-123-45-6789"
+        sourceOfFunds = "Employment"
+        occupation = "Software Engineer"
+
+  -- KYC workflow for Alice → get clearance → flag it
+  kycReqCid <- submit bank do
+    createCmd KYCRequest with
+      institution = bank
+      customer = alice
+      purpose = "Transfer"
+
+  submissionCid <- submit alice do
+    exerciseCmd kycReqCid ProvideKYC with kycData = aliceKycData
+
+  clearanceCid <- submit bank do
+    exerciseCmd submissionCid ApproveKYC with riskLevel = High
+
+  -- Flag the clearance → produces new clearance with Flagged status
+  (flaggedClearanceCid, _sarCid) <- submit bank do
+    exerciseCmd clearanceCid FlagClearance with regulator
+
+  -- Create a transfer for Alice
+  transferCid <- submit (actAs [bank, alice]) do
+    createCmd AssetTransfer with
+      institution = bank
+      sender = alice
+      receiver = bob
+      assetDescription = "USD wire transfer"
+      amount = 500.0
+
+  -- Negative: Flagged clearance must not allow transfer
+  submitMustFail bank do
+    exerciseCmd transferCid ExecuteTransfer with
+      senderClearanceCid = flaggedClearanceCid
+
+  -- KYC for Bob at the same bank
+  let bobKycData = KYCData with
+        personalInfo = PersonalInfo with
+          fullName = "Bob Smith"
+          dateOfBirth = date 1985 Mar 20
+          nationality = "US"
+        address = "456 Oak Ave, Chicago, IL"
+        taxId = "SSN-987-65-4321"
+        sourceOfFunds = "Business income"
+        occupation = "Entrepreneur"
+
+  bobKycReqCid <- submit bank do
+    createCmd KYCRequest with
+      institution = bank
+      customer = bob
+      purpose = "Transfer"
+
+  bobSubmissionCid <- submit bob do
+    exerciseCmd bobKycReqCid ProvideKYC with kycData = bobKycData
+
+  bobClearanceCid <- submit bank do
+    exerciseCmd bobSubmissionCid ApproveKYC with riskLevel = Low
+
+  -- Negative: Bob's clearance must not unlock Alice's transfer
+  submitMustFail bank do
+    exerciseCmd transferCid ExecuteTransfer with
+      senderClearanceCid = bobClearanceCid
 
   pure ()
