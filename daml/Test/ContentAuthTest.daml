@@ -6,7 +6,36 @@ import DA.Optional (isSome)
 
 import Content.ContentAuth
 
--- | Test 1: Content registration & licensing
+-- | Test 1: Content registration and licensing — register → certify → license → approve
+--
+-- PRIVACY GUARANTEE:
+--   Verifies that a ContentCertificate is visible to the registry (signatory)
+--   and the creator (observer), and that a LicenseAgreement is visible only
+--   to the creator and licensee (both signatories). No third party — including
+--   other registry participants — can see Alice's certificate or the license
+--   terms negotiated between Alice and Bob. The licensing workflow is entirely
+--   peer-to-peer between creator and licensee, with the registry not required
+--   as a stakeholder on the LicenseAgreement.
+--
+-- REGULATORY SIGNIFICANCE:
+--   MiFID II Article 25 requires that records of financial transactions
+--   involving instruments (including IP licenses used as financial instruments)
+--   be maintained in a form that allows reconstruction. The ContentCertificate
+--   + LicenseAgreement chain provides this: the certificate establishes
+--   provenance, and the license records the authorized use. GDPR Article
+--   6(1)(b) permits processing necessary for the performance of a contract —
+--   the LicenseAgreement is the contract, and its stakeholder set (creator,
+--   licensee) is exactly the parties to that contract. No third-party observer
+--   is needed for the license to be enforceable.
+--
+-- FAILURE MODE:
+--   If the registry were a signatory on LicenseAgreements, every licensing
+--   transaction would require registry co-authorization and the registry would
+--   receive all license terms — creating a de facto central clearinghouse with
+--   full visibility into commercial licensing arrangements between private
+--   parties. This would violate commercial confidentiality and GDPR data
+--   minimization. The design correctly limits the registry to certification
+--   (its statutory function) and leaves licensing as a private bilateral act.
 testContentRegistrationAndLicensing : Script ()
 testContentRegistrationAndLicensing = do
   registry <- allocatePartyByHint (PartyIdHint "content-registry")
@@ -66,7 +95,38 @@ testContentRegistrationAndLicensing = do
 
   pure ()
 
--- | Test 2: Dispute resolution
+-- | Test 2: Dispute resolution — challenge → registry decides → ownership transferred
+--
+-- PRIVACY GUARANTEE:
+--   Verifies that a ContentDispute is visible to the challenger, registry, and
+--   current owner (all listed as stakeholders on the dispute contract). When
+--   the registry resolves for the challenger, it archives the original
+--   ContentCertificate and creates a new one with the challenger as creator.
+--   The original owner (Alice) loses observer access to the new certificate
+--   because she is no longer the creator — the new certificate's observer is
+--   Bob. This models the legal transfer of IP ownership: the prior owner has
+--   no ongoing interest in the new certificate.
+--
+-- REGULATORY SIGNIFICANCE:
+--   The registry's ability to archive the certificate and create a new one
+--   without Alice's co-authorization is the critical design property that
+--   makes dispute resolution possible. If Alice were a co-signatory on the
+--   certificate, she could block resolution by refusing to sign the archive
+--   transaction — defeating the registry's adjudicatory role. The sole
+--   signatory design (registry only) reflects the legal model of an
+--   authoritative registry that can effect title transfers by court order
+--   or administrative decision, without requiring the losing party's
+--   cooperation. GDPR Article 17(3)(b) explicitly accommodates this: the
+--   right to erasure does not apply where processing is necessary for
+--   compliance with a legal obligation such as a registry's statutory duty
+--   to maintain an accurate ownership record.
+--
+-- FAILURE MODE:
+--   If IP ownership disputes required the losing party's signature to resolve,
+--   no dispute could be settled against a non-cooperating defendant. The entire
+--   value of a public registry depends on its authority to make binding
+--   ownership determinations. The sole signatory design is not a convenience —
+--   it is a prerequisite for the registry to function as a legal institution.
 testDisputeResolution : Script ()
 testDisputeResolution = do
   registry <- allocatePartyByHint (PartyIdHint "content-registry")
@@ -118,7 +178,37 @@ testDisputeResolution = do
 
   pure ()
 
--- | Test 3: Negative cases — unauthorized transfer
+-- | Test 3: Negative cases — unauthorized transfer and unauthorized revocation
+--
+-- PRIVACY GUARANTEE:
+--   Two `submitMustFail` assertions verify the authorization boundary of the
+--   ContentCertificate: (1) Bob cannot transfer Alice's content to himself —
+--   TransferOwnership is controlled by the creator (Alice), not arbitrary
+--   parties; (2) Bob cannot revoke Alice's certificate — Revoke is controlled
+--   by the registry. Bob is an observer on no contract in this test, so he
+--   cannot even reference Alice's certificate ContractId without it being
+--   provided to him — and even if it were, neither choice is available to him.
+--
+-- REGULATORY SIGNIFICANCE:
+--   Unauthorized IP transfer is theft. In financial contexts where IP assets
+--   are used as collateral or traded as instruments, unauthorized transfer
+--   would constitute fraud. The creator-controlled transfer choice means that
+--   only the current owner can initiate a transfer — exactly as in property
+--   law, where a deed transfer requires the grantor's signature. The
+--   registry-controlled revocation ensures that certificates cannot be
+--   destroyed by competitors or bad actors attempting to clear a competitor's
+--   IP record. These controls are enforced at the ledger level: no application
+--   permission configuration grants Bob the ability to exercise choices
+--   reserved for Alice (creator) or the registry.
+--
+-- FAILURE MODE:
+--   In a smart contract system without granular controller constraints,
+--   any party with knowledge of a contract's ID could attempt to call
+--   any of its methods. The DAML controller model means that knowing a
+--   ContractId is necessary but not sufficient to exercise a choice —
+--   you must also be the designated controller. The `submitMustFail`
+--   tests confirm this is enforced at the interpreter level, not the
+--   application layer.
 testContentNegativeCases : Script ()
 testContentNegativeCases = do
   registry <- allocatePartyByHint (PartyIdHint "content-registry")

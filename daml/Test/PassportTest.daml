@@ -50,7 +50,35 @@ bobPassportInfo = PassportInfo with
   issueDate = date 2022 Sep 15
   expiryDate = date 2032 Sep 15
 
--- | Test 1: Full Lifecycle
+-- | Test 1: Full Lifecycle — request → approve → verify → acknowledge
+--
+-- PRIVACY GUARANTEE:
+--   Verifies the end-to-end passport lifecycle including a verification event.
+--   The DigitalPassport is visible to both the authority and the holder (dual
+--   signatories). The VerificationRequest is visible to the verifier and the
+--   holder. Crucially, the verifier (airport check) never receives a reference
+--   to the live DigitalPassport contract — they interact with a
+--   VerificationResponse that contains only the fields the holder chose to
+--   disclose. The airport does not become a persistent observer on the passport
+--   after the verification event concludes.
+--
+-- REGULATORY SIGNIFICANCE:
+--   GDPR Article 5(1)(c) requires data minimization: personal data collected
+--   for one purpose (border control) must not persist beyond what is necessary
+--   for that purpose. The verification pattern implements this: the verifier
+--   receives a point-in-time disclosure response (VerificationResponse), not
+--   ongoing access to the holder's live passport state. If the passport is
+--   subsequently updated, suspended, or revoked, the verifier's prior response
+--   is unaffected and the verifier gains no automatic visibility into the new
+--   state. This is the ledger-level implementation of purpose limitation.
+--
+-- FAILURE MODE:
+--   If verifiers were added as persistent observers on DigitalPassport, every
+--   subsequent passport update (name change, renewal, revocation) would be
+--   broadcast to every party that had ever verified the holder. Over time this
+--   creates an unauthorized surveillance network where dozens of institutions
+--   have continuous read access to a citizen's live identity document — a
+--   direct violation of GDPR purpose limitation and data minimization.
 testFullLifecycle : Script ()
 testFullLifecycle = do
   tp <- setupParties
@@ -110,7 +138,33 @@ testFullLifecycle = do
 
   pure ()
 
--- | Test 2: Multi-Jurisdiction
+-- | Test 2: Multi-Jurisdiction — two authorities issue passports independently
+--
+-- PRIVACY GUARANTEE:
+--   Verifies that passports issued by different sovereign authorities are
+--   isolated from each other. Alice's US passport is not visible to the
+--   Japanese authority, and Bob's Japanese passport is not visible to the US
+--   authority. Each passport's stakeholder set is exactly {authority, holder}
+--   for that jurisdiction — cross-jurisdictional visibility is absent because
+--   no cross-jurisdictional observer relationship exists on either contract.
+--
+-- REGULATORY SIGNIFICANCE:
+--   International data protection frameworks (GDPR, APEC Privacy Framework)
+--   restrict cross-border transfer of personal data absent an adequate legal
+--   basis. A Japanese authority having automatic read access to a US citizen's
+--   passport data — or vice versa — would constitute an unauthorized
+--   cross-border transfer. The authority-scoped signatory model means each
+--   sovereign jurisdiction's identity records stay within that jurisdiction's
+--   participant node. Interoperability, where needed, must be established
+--   through explicit, purposeful disclosure channels (VerificationRequest),
+--   not through ambient observer access.
+--
+-- FAILURE MODE:
+--   In a single-ledger system with a shared participant, all authorities would
+--   see all contracts by default unless filtered by application logic. DAML on
+--   Canton routes transaction events only to stakeholder participants —
+--   jurisdiction isolation is a ledger property, not an application filter that
+--   could be bypassed by an API call to the wrong endpoint.
 testMultiJurisdiction : Script ()
 testMultiJurisdiction = do
   tp <- setupParties
@@ -162,7 +216,39 @@ testMultiJurisdiction = do
 
   pure ()
 
--- | Test 3: Selective Disclosure
+-- | Test 3: Selective Disclosure — holder controls which fields a verifier sees
+--
+-- PRIVACY GUARANTEE:
+--   This is the most important privacy test in the passport module. It verifies
+--   that the holder controls the granularity of identity disclosure: when Alice
+--   responds to a bank's VerificationRequest, she sets a DisclosurePolicy that
+--   exposes name and nationality but withholds date of birth, passport number,
+--   photo hash, issue date, and expiry date. The test asserts field by field
+--   that the VerificationResponse contains `Some` for disclosed fields and
+--   `None` for withheld fields. The verifier (bank) sees only what the holder
+--   authorized — not the full passport record, not even the fields the bank
+--   requested in its DisclosurePolicy.
+--
+-- REGULATORY SIGNIFICANCE:
+--   GDPR Article 5(1)(c) — data minimization — requires that only the personal
+--   data necessary for the specific purpose is collected. A KYC check for
+--   account opening may require name and nationality confirmation but not the
+--   full biometric passport record. The selective disclosure pattern gives
+--   holders a GDPR-compliant mechanism to satisfy KYC requests without
+--   over-disclosing. GDPR Article 25 (data protection by design) requires
+--   that privacy-protective defaults be built into the system — this test
+--   verifies that the system's default is minimal disclosure, with expansion
+--   only through explicit holder authorization.
+--
+-- FAILURE MODE:
+--   Without selective disclosure, every KYC verification would transmit the
+--   full passport record to the verifying institution. Over a holder's lifetime,
+--   dozens of institutions would accumulate complete passport data — biometrics,
+--   passport numbers, expiry dates — creating a distributed database of
+--   high-value identity data with no GDPR-compliant deletion mechanism. A
+--   breach at any one institution would expose the full biometric record.
+--   The selective disclosure model limits each verifier to the minimum
+--   necessary fields, reducing the blast radius of any downstream breach.
 testSelectiveDisclosure : Script ()
 testSelectiveDisclosure = do
   tp <- setupParties
@@ -232,7 +318,35 @@ testSelectiveDisclosure = do
 
   pure ()
 
--- | Test 4: Update Workflow
+-- | Test 4: Update Workflow — holder requests update, authority approves, old passport archived
+--
+-- PRIVACY GUARANTEE:
+--   Verifies that passport updates follow the request/approve pattern with
+--   dual-party authorization, and that the original passport is archived —
+--   not queryable — after the update is approved. `queryContractId alice
+--   passportCid` returns `None` after ApproveUpdate, confirming that only
+--   the current version of the passport is accessible on the active ledger.
+--   The holder's field-level update (name change, photo update) requires
+--   authority co-authorization, preventing unilateral self-amendment of a
+--   state-issued document.
+--
+-- REGULATORY SIGNIFICANCE:
+--   GDPR Article 16 grants the right to rectification of inaccurate personal
+--   data. The UpdateRequest/ApproveUpdate pattern implements this compliantly:
+--   the holder can request correction, but the issuing authority validates
+--   and approves the change. This mirrors the real-world passport amendment
+--   process, where a name change requires documentary evidence (marriage
+--   certificate, court order) reviewed by the issuing authority. Allowing
+--   unilateral self-update would defeat the authority's role as trusted
+--   identity attester and enable fraudulent identity modification.
+--
+-- FAILURE MODE:
+--   If holders could self-amend DigitalPassport fields — for example, by
+--   exercising a consuming choice that recreated the contract with modified
+--   data — they could change nationality, name, or expiry date without
+--   state authorization. A person on a sanctions list could change their
+--   name; an expired passport could be self-renewed; nationality could be
+--   falsified to circumvent jurisdiction-specific restrictions.
 testUpdateWorkflow : Script ()
 testUpdateWorkflow = do
   tp <- setupParties
@@ -275,7 +389,37 @@ testUpdateWorkflow = do
 
   pure ()
 
--- | Test 5: Revocation
+-- | Test 5: Revocation — suspend, reactivate, revoke lifecycle
+--
+-- PRIVACY GUARANTEE:
+--   Verifies the authority's unilateral control over passport status
+--   transitions, and confirms that a revoked passport is no longer queryable
+--   by any party — including the issuing authority. `queryContractId
+--   usAuthority reactivatedCid` returns `None` after Revoke, confirming that
+--   archival removes the contract from all stakeholder nodes. The test also
+--   verifies the state machine constraints: only Active passports can be
+--   suspended, only Suspended passports can be reactivated.
+--
+-- REGULATORY SIGNIFICANCE:
+--   Passport revocation is a unilateral state act — it does not require the
+--   holder's consent. Revocation grounds include: reported theft or loss,
+--   court order, national security grounds, or death of the holder. The
+--   authority-only controller on Revoke and Suspend models this correctly:
+--   the holder cannot prevent revocation of their own passport, just as in
+--   the physical world. The state machine assertions (Active → Suspended only,
+--   Suspended → Active only for Reactivate) prevent double-revocation and
+--   out-of-order transitions that could corrupt the document's legal status.
+--   OFAC and law enforcement agencies frequently request passport revocation
+--   as part of sanctions enforcement and fugitive apprehension — the authority's
+--   unilateral revocation power on Canton models this enforcement capability.
+--
+-- FAILURE MODE:
+--   If the holder could block or delay revocation — for example, if revocation
+--   required holder co-authorization — a sanctioned individual or fraud suspect
+--   could indefinitely maintain a valid passport by refusing to sign the
+--   revocation transaction. The authority-only controller ensures that the
+--   state's enforcement power over its own issued documents is not contingent
+--   on the subject's cooperation.
 testRevocation : Script ()
 testRevocation = do
   tp <- setupParties
@@ -319,7 +463,36 @@ testRevocation = do
 
   pure ()
 
--- | Test 6: Negative Cases
+-- | Test 6: Negative Cases — cross-authority approval, holder self-action, verifier impersonation
+--
+-- PRIVACY GUARANTEE:
+--   Six `submitMustFail` assertions verify the authority and holder
+--   authorization boundaries: a foreign authority (JP) cannot approve a
+--   request submitted to a different authority (US); the holder cannot
+--   self-revoke or self-suspend their own passport; a suspended passport
+--   cannot be suspended again; a foreign authority cannot reactivate another
+--   authority's passport; and a third-party verifier cannot respond to a
+--   VerificationRequest on the holder's behalf.
+--
+-- REGULATORY SIGNIFICANCE:
+--   The cross-authority blocking test is particularly significant: it verifies
+--   that sovereign jurisdiction boundaries are enforced at the ledger level.
+--   A Japanese authority approving a US passport request would constitute
+--   an unauthorized issuance of a foreign travel document — legally void and
+--   potentially a criminal act. The verifier-impersonation test protects the
+--   integrity of selective disclosure: only the holder can decide what to
+--   disclose in a VerificationResponse. If the verifier could respond on the
+--   holder's behalf, they could fabricate disclosures, claim fields were
+--   disclosed that were not, or construct a fraudulent identity verification
+--   response for submission to a third system.
+--
+-- FAILURE MODE:
+--   These failure modes represent real attack vectors: jurisdiction spoofing
+--   (a malicious authority issuing documents for another state's citizens),
+--   self-suspension to avoid travel restrictions, and verification forgery.
+--   Each is prevented by a specific controller constraint in the contract
+--   definition — not by application-layer validation that could be bypassed
+--   by a direct ledger API call.
 testNegativeCases : Script ()
 testNegativeCases = do
   tp <- setupParties

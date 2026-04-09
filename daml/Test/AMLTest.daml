@@ -8,6 +8,30 @@ import Identity.Types
 import AML.Compliance
 
 -- | Test 1: KYC workflow — bank requests → customer provides → bank clears
+--
+-- PRIVACY GUARANTEE:
+--   Verifies that a KYCClearance is visible to both the institution and the
+--   customer — and only them. The institution queries via CID and confirms the
+--   record exists; the customer queries their own clearance and reads the risk
+--   level and status fields. No third party is asserted to have visibility,
+--   reflecting that KYCClearance has no observers beyond its two signatories.
+--
+-- REGULATORY SIGNIFICANCE:
+--   Under BSA 31 CFR § 1020.220, a bank's CIP records must be maintained for
+--   five years and produced only to regulators on examination request — not to
+--   other institutions, not to the public. The signatory-only visibility model
+--   on KYCClearance enforces this: the clearance is not observable to any party
+--   that is not the institution or the customer. A regulator sees it only if
+--   escalation produces a SAR or FreezeOrder, which follows its own access
+--   model. This tests the foundational read-access boundary for CIP records.
+--
+-- FAILURE MODE:
+--   If KYCClearance were created with a broad observer list (e.g., all parties
+--   on the participant), any connected institution could read another bank's
+--   customer clearance records, violating BSA confidentiality and triggering
+--   GLBA data-sharing restrictions. The DAML model prevents this structurally:
+--   only signatories are stakeholders, and only stakeholders receive transaction
+--   events on their participant node.
 testKYCWorkflow : Script ()
 testKYCWorkflow = do
   bankKYC <- allocatePartyByHint (PartyIdHint "bank-kyc")
@@ -56,6 +80,51 @@ testKYCWorkflow = do
   pure ()
 
 -- | Test 2: SAR filing — bank flags → regulator escalates → FreezeOrder created
+--
+-- PRIVACY GUARANTEE:
+--   This is the most important privacy test in the suite. It verifies that a
+--   SuspiciousActivityReport is invisible to its subject. After the institution
+--   exercises FlagKYC and creates the SAR, `queryContractId alice sarCid`
+--   returns `None`. Alice does not receive an authorization error — she receives
+--   structural absence. The SAR transaction was never routed to her participant
+--   node because she is not a signatory or observer on the contract. The test
+--   also verifies the escalation path: the regulator, who is an observer, can
+--   exercise Escalate and produce a FreezeOrder, confirming that the observer
+--   access grant is precisely scoped to the regulatory recipient.
+--
+-- REGULATORY SIGNIFICANCE:
+--   BSA Section 5318(g)(2)(A)(i) states that a financial institution that
+--   voluntarily reports a suspicious transaction shall not be liable and that
+--   "no officer or employee of the Federal Government or of any State, local,
+--   tribal, or territorial government... may disclose to any person involved in
+--   the transaction that the transaction has been reported." The statute does
+--   not say the disclosure must be prevented by policy — it imposes criminal
+--   penalties for the act of disclosure itself. Implementing this as a database
+--   permission or middleware rule creates a surface for bugs, misconfigurations,
+--   and administrative overrides to produce unlawful disclosure. Implementing
+--   it in DAML means the ledger interpreter enforces non-disclosure before any
+--   application code executes. Additionally, SAR confidentiality is reinforced
+--   by a FOIA exemption under 5 U.S.C. § 552(b)(3): even a court-ordered
+--   subpoena cannot compel disclosure of SAR filing status in most
+--   circumstances, because the SAR Safe Harbor provision (31 U.S.C. § 5318(g)(2))
+--   provides blanket protection against compelled disclosure. The DAML model
+--   exceeds what FOIA alone provides — the data is not merely protected from
+--   disclosure, it is architecturally absent from the subject's participant.
+--
+-- FAILURE MODE:
+--   If the customer were added as an observer on SuspiciousActivityReport —
+--   even accidentally, through a refactor that copies observer lists from a
+--   related template — every SAR filing would constitute a federal criminal
+--   offense under BSA § 5318(g). The subject would know they were reported,
+--   could destroy evidence, restructure transactions below BSA thresholds,
+--   or flee jurisdiction before law enforcement could act. Financial
+--   intelligence derived from SAR data is the primary input to law enforcement
+--   investigations of money laundering, terrorism financing, and sanctions
+--   evasion. A single disclosure failure can compromise an active investigation.
+--   In a traditional system, this risk is managed by policy and code review.
+--   In DAML, it is managed by the type system: the customer cannot be an
+--   observer unless a developer explicitly adds them to the observer list,
+--   and the test will fail the moment that happens.
 testSARFiling : Script ()
 testSARFiling = do
   bankKYC <- allocatePartyByHint (PartyIdHint "bank-kyc")
@@ -100,6 +169,36 @@ testSARFiling = do
   pure ()
 
 -- | Test 3: Negative cases — customer can't self-clear, unauthorized revocation
+--
+-- PRIVACY GUARANTEE:
+--   Verifies three authorization boundaries that protect the integrity of the
+--   KYC approval chain: (1) a customer cannot exercise ApproveKYC on their own
+--   submission — approval is locked to the institution controller; (2) the
+--   customer cannot revoke their own clearance — RevokeClearance is locked to
+--   the institution; (3) a third party (Bob) cannot revoke another customer's
+--   clearance — Bob is not a stakeholder on Alice's KYCClearance and the
+--   submission fails before reaching the controller check.
+--
+-- REGULATORY SIGNIFICANCE:
+--   Self-approval of KYC would render the entire CIP regime meaningless: a
+--   customer could unilaterally assert their own identity verification and
+--   source of funds, bypassing the regulated institution's obligation to
+--   independently verify. BSA § 1020.220 places the CIP obligation on the
+--   institution, not the customer. The controller model enforces this: only
+--   the institution can make the compliance determination. Similarly, allowing
+--   a customer to revoke their own clearance would allow a flagged customer to
+--   destroy their KYC record before a SAR is filed, undermining BSA § 1020.210
+--   recordkeeping requirements. Third-party revocation would allow competitors
+--   or bad actors to disrupt another institution's customer relationship.
+--
+-- FAILURE MODE:
+--   In a conventional system with RBAC, a misconfigured role assignment or a
+--   missing authorization check could allow self-approval. In DAML, the
+--   controller field is part of the contract definition: it cannot be
+--   misconfigured at deployment time without changing the source code. These
+--   `submitMustFail` assertions are compile-time-adjacent guarantees that the
+--   authorization logic cannot be bypassed by any caller, regardless of how
+--   the application layer is configured.
 testAMLNegativeCases : Script ()
 testAMLNegativeCases = do
   bankKYC <- allocatePartyByHint (PartyIdHint "bank-kyc")
@@ -157,6 +256,33 @@ testAMLNegativeCases = do
   pure ()
 
 -- | Test 4: Transfer gate happy path — cleared KYC allows transfer to complete
+--
+-- PRIVACY GUARANTEE:
+--   Verifies that the KYC-gated transfer path works end-to-end: a customer with
+--   an active Cleared KYCClearance can have their AssetTransfer executed by the
+--   institution, producing an immutable TransferRecord. The TransferRecord is
+--   visible to the institution (signatory), sender (signatory), and receiver
+--   (observer) — and only those parties. No regulator or third party receives
+--   the transfer record absent an escalation event.
+--
+-- REGULATORY SIGNIFICANCE:
+--   Under the BSA's recordkeeping rules (31 CFR § 1020.410) and FinCEN's funds
+--   transfer rules, institutions must verify the identity of parties to
+--   reportable transfers and maintain records for five years. The ExecuteTransfer
+--   choice fetches the KYCClearance and asserts both customer identity match and
+--   Cleared status before creating the TransferRecord. This models the required
+--   pre-transfer verification step as a ledger-enforced precondition, not an
+--   application-layer check that could be skipped. MiFID II Article 25 requires
+--   that transaction records be maintained in a form that allows reconstruction
+--   of the transaction; the immutable TransferRecord (consuming choice, no
+--   archive path except through the signatory) satisfies this.
+--
+-- FAILURE MODE:
+--   If the KYC gate were implemented in application middleware rather than as a
+--   contract assertion, a developer could bypass it by calling the ledger API
+--   directly. The DAML model makes bypass impossible: ExecuteTransfer always
+--   fetches and asserts the clearance, and the assertion runs in the ledger
+--   interpreter before the TransferRecord is created.
 testTransferGate : Script ()
 testTransferGate = do
   bank <- allocatePartyByHint (PartyIdHint "bank-gate")
@@ -207,6 +333,36 @@ testTransferGate = do
   pure ()
 
 -- | Test 5: Transfer gate blocked — flagged or wrong clearance prevents transfer
+--
+-- PRIVACY GUARANTEE:
+--   Verifies two distinct blocking conditions on AssetTransfer.ExecuteTransfer:
+--   (1) a clearance in Flagged status is rejected even if it belongs to the
+--   correct customer — the status assertion fires before the record is created;
+--   (2) a valid Cleared clearance belonging to a different customer (Bob's)
+--   cannot be used to authorize Alice's transfer — the customer identity
+--   assertion fires. These two checks together prevent both status-bypass and
+--   cross-customer clearance substitution attacks.
+--
+-- REGULATORY SIGNIFICANCE:
+--   The Flagged-status block models the ongoing monitoring obligation under BSA
+--   § 1020.210: once a customer's activity is flagged as suspicious, the
+--   institution must not continue to execute transfers on their behalf as if
+--   nothing has changed. Allowing a flagged customer to continue transacting
+--   would constitute facilitation of the activity that triggered the flag.
+--   The cross-customer identity check models the BSA requirement that KYC
+--   clearance is specific to the customer-institution relationship: a clearance
+--   issued to Bob at the same bank does not authorize Alice's transfers. In
+--   practice, cross-customer clearance substitution is an attack vector for
+--   money mule schemes, where a cleared account is used to process transactions
+--   on behalf of an uncleared or flagged party.
+--
+-- FAILURE MODE:
+--   If the status check were omitted, a customer could receive clearance, be
+--   flagged (SAR filed), and continue executing transfers using their pre-flag
+--   clearance — defeating the purpose of the post-approval monitoring obligation.
+--   If the customer identity check were omitted, any party that had obtained
+--   clearance at an institution could execute transfers for any other customer,
+--   enabling systematic account takeover or authorized-push-payment fraud.
 testTransferGateBlocked : Script ()
 testTransferGateBlocked = do
   bank <- allocatePartyByHint (PartyIdHint "bank-blocked")

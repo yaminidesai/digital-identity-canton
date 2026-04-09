@@ -17,8 +17,38 @@ import AML.Compliance
 import Content.ContentAuth qualified as CC
 import Content.ContentAuth (ContentRegistrationRequest(..), ContentInfo(..), ContentType(..))
 
--- | Test 1: Birth cert → passport
--- Person gets birth certificate, then uses identity to get passport
+-- | Test 1: Birth cert → passport — foundational identity chain
+--
+-- PRIVACY GUARANTEE:
+--   Verifies that identity data flows across modules only through explicit
+--   holder action, not through shared state. Alice's BirthCertificate and
+--   DigitalPassport are separate contracts with separate stakeholder sets.
+--   The birth registry is not an observer on the passport; the passport
+--   authority is not an observer on the birth certificate. The holder
+--   (Alice) is the only party present in both contracts, and she manually
+--   copies her identity fields from birth info to passport info when
+--   submitting the IdentityRequest. There is no automatic cross-module
+--   data link that would give one authority access to the other's records.
+--
+-- REGULATORY SIGNIFICANCE:
+--   Data minimization (GDPR Art. 5(1)(c)) and purpose limitation (Art. 5(1)(b))
+--   require that data collected for civil registration is not automatically
+--   available to the passport authority, and vice versa. Even though both
+--   authorities need some of the same data (name, date of birth, nationality),
+--   they receive it independently from the data subject — not from each other.
+--   This models the correct legal relationship: the passport authority is not
+--   a downstream consumer of the civil registry's database; it independently
+--   verifies identity and issues its own credential. Cross-authority data
+--   sharing, where it exists, must be explicitly authorized and subject to
+--   its own legal basis.
+--
+-- FAILURE MODE:
+--   In a monolithic identity system, birth registry data would be directly
+--   queried by the passport authority — creating an implicit data-sharing
+--   arrangement with no GDPR legal basis. If the civil registry were an
+--   observer on DigitalPassport contracts, it would receive every passport
+--   update, including name changes and photo updates, without the holder's
+--   knowledge. The module-isolated design prevents this by construction.
 testBirthCertToPassport : Script ()
 testBirthCertToPassport = do
   civilRegistry <- allocatePartyByHint (PartyIdHint "civil-registry")
@@ -90,8 +120,37 @@ testBirthCertToPassport = do
 
   pure ()
 
--- | Test 2: Identity → voter registration
--- Citizen registers to vote using personal info
+-- | Test 2: Identity → voter registration — cross-module identity portability
+--
+-- PRIVACY GUARANTEE:
+--   Verifies that the passport authority does not become a stakeholder in the
+--   electoral workflow. Alice uses her passport's identity fields to populate
+--   a VoterRegistrationRequest, but the passport authority (usAuthority) is
+--   not a party to the VoterRegistration, the Election, or the Ballot. The
+--   election commission does not have access to Alice's passport contract.
+--   Electoral participation and travel document issuance are fully isolated
+--   stakeholder scopes — the holder carries data between them, not the
+--   authorities.
+--
+-- REGULATORY SIGNIFICANCE:
+--   The separation of electoral identity from government-issued travel
+--   documents reflects a constitutional privacy principle in many democracies:
+--   voter registration data and passport data are maintained by separate
+--   agencies with separate legal mandates, and cross-linking them requires
+--   explicit legislative authorization. Automatically connecting them through
+--   shared observer access would create a political profile — who is registered
+--   to vote, in which constituency — accessible to the passport authority,
+--   which has no lawful basis under GDPR Article 9(2) to process electoral
+--   participation data. The integration test verifies that this cross-linking
+--   does not occur at the ledger level.
+--
+-- FAILURE MODE:
+--   If the passport authority were an observer on VoterRegistration contracts
+--   — for example, through a design that added all prior identity attestors
+--   as observers on derived identity credentials — the government would have
+--   a real-time feed of electoral enrollment activity across all passport
+--   holders. In jurisdictions with restricted political freedoms, this would
+--   constitute a surveillance infrastructure enabling political targeting.
 testIdentityToVoterRegistration : Script ()
 testIdentityToVoterRegistration = do
   usAuthority <- allocatePartyByHint (PartyIdHint "us-authority")
@@ -172,8 +231,40 @@ testIdentityToVoterRegistration = do
 
   pure ()
 
--- | Test 3: Identity → KYC
--- Citizen provides info from passport for bank KYC clearance
+-- | Test 3: Identity → KYC — identity-to-financial-compliance chain
+--
+-- PRIVACY GUARANTEE:
+--   Verifies that the KYC clearance for Alice at a financial institution does
+--   not grant the institution access to Alice's passport or birth certificate.
+--   The institution (bankKYC) receives only what Alice provides in her
+--   KYCData submission — she copies name, date of birth, and nationality from
+--   her passport fields, but the bank has no ContractId reference to the
+--   passport and is not a stakeholder on it. The KYCClearance is co-signed by
+--   institution and customer; the passport authority is absent from that
+--   contract entirely.
+--
+-- REGULATORY SIGNIFICANCE:
+--   BSA CIP rules (31 CFR § 1020.220) require the institution to collect and
+--   verify identity information — they do not grant the institution access to
+--   the government's identity database. The institution must independently
+--   verify the information provided, using documentary evidence (a copy of the
+--   passport, in practice). The DAML model reflects this correctly: the
+--   institution receives customer-provided data and makes its own verification
+--   determination. If the institution were an observer on DigitalPassport, it
+--   would have live access to the government's identity record — a data-sharing
+--   arrangement that would require a formal government-to-institution data
+--   sharing agreement and explicit GDPR legal basis under Article 6(1)(e) or (c).
+--   The current design avoids this by keeping the institution's KYC data
+--   entirely within the AML module's stakeholder scope.
+--
+-- FAILURE MODE:
+--   If financial institutions were granted observer access on passport contracts
+--   as a convenience for KYC verification, the government identity database
+--   would become effectively public to the regulated financial sector. Every
+--   passport update — name change, renewal, revocation — would be broadcast to
+--   every bank that had ever performed KYC on the holder. This would constitute
+--   unauthorized processing of special-category biometric data (GDPR Art. 9)
+--   by private institutions without a valid legal basis.
 testIdentityToKYC : Script ()
 testIdentityToKYC = do
   usAuthority <- allocatePartyByHint (PartyIdHint "us-authority")

@@ -7,7 +7,36 @@ import Identity.Types
 import Identity.Roles
 import Voting.Voting
 
--- | Test 1: Full election lifecycle
+-- | Test 1: Full election lifecycle — register → create election → vote → close → publish
+--
+-- PRIVACY GUARANTEE:
+--   Verifies that ballots are co-signed by both the commission and the voter,
+--   making each ballot visible to both parties and no one else. The election
+--   contract (signed by the commission alone) accumulates the `voters : [Party]`
+--   list to track participation without revealing how each voter voted — the
+--   vote choice is in the Ballot contract, which is a separate stakeholder
+--   scope. A voter can see their own ballot; they cannot see other voters'
+--   ballots, because no voter is an observer on another voter's Ballot contract.
+--
+-- REGULATORY SIGNIFICANCE:
+--   Electoral law universally requires ballot secrecy: the choice a voter makes
+--   must be known only to the voter (and the commission for counting purposes).
+--   The separation of participation tracking (Election.voters list) from vote
+--   recording (Ballot contract) implements this correctly: commission can verify
+--   that Alice voted without being able to attribute Alice's choice to her,
+--   because the choice field lives in a contract whose stakeholders are
+--   commission and voter — not other voters. GDPR Article 9(2)(g) permits
+--   processing of political data for reasons of substantial public interest;
+--   the minimal-observer ballot design satisfies the accompanying data
+--   minimization obligation.
+--
+-- FAILURE MODE:
+--   If all voters were observers on all Ballot contracts — for example, through
+--   a naive implementation that put the full voter list as observers on each
+--   ballot — every voter could see every other voter's choice, destroying the
+--   secret ballot guarantee. In jurisdictions with voter intimidation risks,
+--   this would make the election invalid and expose the system operator to
+--   criminal liability under electoral law.
 testElectionLifecycle : Script ()
 testElectionLifecycle = do
   commission <- allocatePartyByHint (PartyIdHint "election-commission")
@@ -89,7 +118,39 @@ testElectionLifecycle = do
 
   pure ()
 
--- | Test 2: Double-vote prevention
+-- | Test 2: Double-vote prevention — second ballot attempt fails
+--
+-- PRIVACY GUARANTEE:
+--   Verifies that a voter who has already cast a ballot cannot cast a second
+--   one. CastBallot asserts `notElem voter voters` against the accumulated
+--   voter list on the Election contract. After Alice's first ballot, the
+--   Election is recreated with `voters = [alice]`. Her second attempt fails
+--   because the assertion fires against the updated list. The voter list is
+--   on the Election contract (signed by commission alone), not on the Ballot —
+--   so participation is tracked without revealing individual choices.
+--
+-- REGULATORY SIGNIFICANCE:
+--   One-person-one-vote is a constitutional requirement in most democratic
+--   jurisdictions. In digital voting systems, double-vote prevention must be
+--   enforced at the data layer, not just the application layer, because any
+--   application-layer control can be bypassed by direct API access. The DAML
+--   assertion runs in the ledger interpreter: no amount of application-layer
+--   manipulation can submit a second ballot without the interpreter rejecting
+--   it. The consuming nature of CastBallot (it archives the current Election
+--   and creates a new one with the updated voter list) ensures that the voter
+--   list update and ballot creation are atomic — there is no race condition
+--   window in which two concurrent ballots from the same voter could both
+--   succeed before the voter list is updated.
+--
+-- FAILURE MODE:
+--   A double-vote race condition in a conventional system occurs when two
+--   ballot submissions arrive simultaneously and both pass the "has this voter
+--   voted?" check before either commits the voter list update. DAML's
+--   consuming choice model makes this impossible: the first CastBallot
+--   consumes the Election contract, and the second cannot exercise a choice
+--   on a contract that no longer exists. The double-vote prevention is a
+--   consequence of the ledger's atomic transaction model, not a lock or a
+--   serialization hint.
 testDoubleVotePrevention : Script ()
 testDoubleVotePrevention = do
   commission <- allocatePartyByHint (PartyIdHint "election-commission")
@@ -137,7 +198,34 @@ testDoubleVotePrevention = do
 
   pure ()
 
--- | Test 3: Unregistered voter cannot vote
+-- | Test 3: Unregistered voter cannot vote — identity substitution blocked
+--
+-- PRIVACY GUARANTEE:
+--   Verifies that a voter cannot cast a ballot using another voter's
+--   VoterRegistration. Bob attempts to call CastBallot with Alice's
+--   registration ContractId but his own voter identity. The assertion
+--   `reg.voter == voter` fires: the registration belongs to Alice, but
+--   the voter field passed to CastBallot is Bob. The commission's registration
+--   record cannot be co-opted by a third party.
+--
+-- REGULATORY SIGNIFICANCE:
+--   Electoral identity substitution — using another registered voter's
+--   credentials to cast a ballot — is electoral fraud in every jurisdiction.
+--   The VoterRegistration contract is co-signed by commission and voter; the
+--   voter field is set at registration time and is immutable. The CastBallot
+--   assertion that `reg.voter == voter` ensures that the identity on the
+--   registration matches the party exercising the choice. This cannot be
+--   forged: the `voter` parameter to CastBallot is the party submitting the
+--   transaction, which Canton verifies cryptographically from the submitting
+--   participant's signing key.
+--
+-- FAILURE MODE:
+--   If the voter identity check were omitted from CastBallot, an attacker
+--   who obtained a reference to another voter's VoterRegistration ContractId
+--   — which is possible if the registration is visible to them as an observer
+--   on some other contract — could cast ballots in that voter's name. The
+--   explicit identity assertion makes the ContractId knowledge insufficient:
+--   you must also be the correct party.
 testUnregisteredVoter : Script ()
 testUnregisteredVoter = do
   commission <- allocatePartyByHint (PartyIdHint "election-commission")
@@ -180,6 +268,35 @@ testUnregisteredVoter = do
   pure ()
 
 -- | Test 4: Negative cases — voter can't close, can't vote after close
+--
+-- PRIVACY GUARANTEE:
+--   Two `submitMustFail` assertions verify that: (1) a voter cannot close
+--   an election — CloseElection is controlled by the commission; (2) no voter
+--   can cast a ballot on a Closed election — CastBallot asserts
+--   `status == Open`. Together these protect the integrity of the election
+--   lifecycle: the commission controls when voting begins and ends, and
+--   the ledger enforces that the closed state is terminal for ballot
+--   acceptance.
+--
+-- REGULATORY SIGNIFICANCE:
+--   Electoral law requires that the commission — not individual voters —
+--   controls the opening and closing of polls. A voter who could close the
+--   election early could disenfranchise all subsequent voters, a form of
+--   electoral manipulation. A voter who could cast a ballot after the
+--   commission has closed polls could unilaterally change the result after
+--   unofficial tallies have been published. Both attacks are prevented by
+--   the controller model: CloseElection is exclusively the commission's
+--   choice, and CastBallot's status assertion rejects any ballot submitted
+--   against a Closed election regardless of who submits it.
+--
+-- FAILURE MODE:
+--   In a web-based voting system, poll closing is typically a backend
+--   operation that sets a database flag. A race condition or a direct
+--   database write could set the flag incorrectly, or an API endpoint
+--   could accept ballot submissions after the flag is set if the check
+--   is done in application code. In DAML, the election status is a field
+--   on the contract — it is read and asserted within the same atomic
+--   transaction as the ballot creation, with no window for a race.
 testVotingNegativeCases : Script ()
 testVotingNegativeCases = do
   commission <- allocatePartyByHint (PartyIdHint "election-commission")

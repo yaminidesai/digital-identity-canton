@@ -97,6 +97,44 @@ template KYCSubmission
       do pure ()
 
 -- | Active KYC clearance for a customer at an institution
+--
+-- FINANCIAL CONTEXT:
+--   Represents the output of a completed Customer Identification Program (CIP)
+--   review under BSA 31 CFR § 1020.220. A KYCClearance is the affirmative
+--   institution finding that a customer's identity has been verified, their
+--   source of funds is documented, and their risk level has been assessed.
+--   It is the gate contract for asset transfers: ExecuteTransfer on AssetTransfer
+--   asserts that a valid, non-flagged KYCClearance exists for the sender at
+--   that institution. Post-clearance monitoring is modeled by FlagClearance,
+--   which transitions the status to Flagged and concurrently files a SAR —
+--   representing the ongoing monitoring obligation under BSA § 1020.210.
+--
+-- SIGNATORIES: institution, customer
+--   The institution signs as the regulated entity legally responsible for
+--   performing and documenting the KYC review. Its signature creates an
+--   auditable on-ledger record of the institution's compliance determination,
+--   satisfying BSA recordkeeping requirements. The customer co-signs because
+--   KYCClearance contains their submitted personal and financial data — under
+--   GDPR, processing of this data requires the data subject's authorization.
+--   The customer's co-signature also serves as their acknowledgement that the
+--   data they submitted has been accepted and will be retained.
+--
+-- OBSERVERS: none
+--   No third-party observers. A regulator does not need continuous visibility
+--   into every customer's clearance status — they gain access when a SAR is
+--   filed (observer on SuspiciousActivityReport) or a FreezeOrder is issued
+--   (signatory). This reflects the BSA examination model: regulators audit
+--   records on request rather than receiving a live feed of all clearances.
+--
+-- COMPLIANCE:
+--   BSA 31 CFR § 1020.220 — Customer Identification Program; institution
+--   signature is the on-ledger CIP completion record.
+--   BSA § 1020.210 — ongoing monitoring obligation; FlagClearance models
+--   post-clearance escalation when new information triggers suspicion.
+--   FinCEN guidance — risk-level field (Low/Medium/High/Critical) documents
+--   the institution's risk-based approach as required by FinCEN rules.
+--   GDPR Art. 6(1)(c) — processing is necessary for compliance with a legal
+--   obligation (BSA); customer co-signature satisfies transparency requirement.
 template KYCClearance
   with
     institution : Party
@@ -131,6 +169,45 @@ template KYCClearance
         pure (newClearanceCid, sarCid)
 
 -- | Freeze order issued by a regulator after escalation
+--
+-- FINANCIAL CONTEXT:
+--   Represents a regulatory asset freeze directive issued after a SAR has
+--   been escalated. In practice this models two overlapping enforcement
+--   mechanisms: (1) a FinCEN-directed freeze following SAR escalation under
+--   BSA authority, and (2) an OFAC blocking order under the International
+--   Emergency Economic Powers Act (IEEPA) when the subject is identified as
+--   a Specially Designated National (SDN). The FreezeOrder is the first
+--   contract in this system where the customer is explicitly made an observer
+--   — in contrast to the SAR — because once a freeze is executed, the
+--   institution is legally required to notify the subject that their assets
+--   are blocked and provide the regulatory authority for the action.
+--
+-- SIGNATORIES: regulator
+--   The regulator is the sole signatory because a freeze order is a
+--   unilateral regulatory enforcement action, not a bilateral agreement.
+--   The institution and customer have no authority to prevent or contest
+--   the freeze at the contract creation level — they can only respond to
+--   it (AcknowledgeFreeze, LiftFreeze). Sole regulator signatory models
+--   the legal supremacy of the regulatory order over private party interests.
+--
+-- OBSERVERS: institution, customer
+--   Both are observers because the freeze must be disclosed to both parties.
+--   The institution must acknowledge the freeze and halt processing of the
+--   customer's transactions (AcknowledgeFreeze choice). The customer must
+--   be notified of the freeze and the blocking authority — this is a legal
+--   requirement distinct from the SAR tipping-off prohibition, which applies
+--   only to the SAR filing itself, not to subsequent enforcement actions
+--   that flow from it. This design models the precise legal boundary:
+--   SAR confidential, enforcement action disclosed.
+--
+-- COMPLIANCE:
+--   OFAC sanctions regulations (31 CFR Ch. V) — blocking orders require
+--   institution compliance and subject notification; institution and customer
+--   observer status models this mandatory disclosure.
+--   BSA / FinCEN enforcement authority — regulator sole signatory models
+--   the unilateral enforcement power granted by the BSA.
+--   IEEPA (50 U.S.C. § 1701) — legal basis for asset blocking orders;
+--   regulator's LiftFreeze choice models the statutory authority to unblock.
 template FreezeOrder
   with
     regulator : Party
@@ -150,6 +227,53 @@ template FreezeOrder
       do pure ()
 
 -- | Suspicious activity report filed by an institution
+--
+-- FINANCIAL CONTEXT:
+--   Represents a mandatory Suspicious Activity Report (SAR) filing under
+--   31 CFR § 1020.320. Financial institutions must file a SAR within 30
+--   calendar days of detecting a transaction or pattern that involves funds
+--   derived from illegal activity, is designed to evade BSA reporting
+--   requirements, or lacks a lawful purpose. SARs are filed with FinCEN and
+--   are the primary intelligence input for law enforcement financial crime
+--   investigations. This contract models the SAR as a ledger object: created
+--   by the institution, visible only to the designated regulator, and capable
+--   of being escalated to a FreezeOrder by regulatory action.
+--
+-- SIGNATORIES: institution
+--   The institution is the sole signatory because it is the regulated entity
+--   with the legal obligation to file the SAR. The SAR is an institutional
+--   compliance act, not a bilateral agreement — the customer neither consents
+--   to it nor has any legal standing to prevent or contest it at the filing
+--   stage. Making the institution the sole signatory reflects this: the
+--   contract is created by a unilateral act of the institution exercising
+--   its BSA obligations, without requiring any counterparty authorization.
+--
+-- OBSERVERS: regulator (NOT customer)
+--   The regulator is an observer because FinCEN is the statutory recipient
+--   of SAR filings — it must have ledger visibility to acknowledge and act
+--   on the report. The customer is DELIBERATELY NOT an observer. BSA Section
+--   5318(g) imposes a strict tipping-off prohibition: an institution that
+--   discloses to any person that a SAR was filed, or that information was
+--   provided to FinCEN, commits a federal offense. This prohibition is
+--   further reinforced by a FOIA exemption — even a court-ordered subpoena
+--   cannot compel disclosure of SAR filing status in most circumstances.
+--   In DAML, the customer's exclusion from the observer list is not a policy
+--   setting or an access control rule — it is a structural property of the
+--   contract. The Canton ledger will never deliver this contract's transaction
+--   events to the customer's participant node. Disclosure is architecturally
+--   impossible, not merely prohibited.
+--
+-- COMPLIANCE:
+--   BSA § 5318(g) — mandatory SAR filing and tipping-off prohibition;
+--   the absence of the customer as observer enforces non-disclosure at the
+--   ledger interpreter level, not at the application layer.
+--   31 CFR § 1020.320 — SAR filing requirements for banks; institution
+--   signatory models the filing institution's legal accountability.
+--   FinCEN SAR regulations — regulator observer models FinCEN as the
+--   statutory recipient with authority to act on the report.
+--   FOIA exemption (5 U.S.C. § 552(b)(3)) — SAR confidentiality protected
+--   from compelled disclosure; ledger-level enforcement exceeds what FOIA
+--   alone provides by making the data structurally inaccessible.
 template SuspiciousActivityReport
   with
     institution : Party

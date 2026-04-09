@@ -31,6 +31,41 @@ template IdentityRequest
       do pure ()
 
 -- | A digital passport issued by an authority to a holder.
+--
+-- FINANCIAL CONTEXT:
+--   Represents a state-issued travel and identity document that serves as
+--   primary proof of nationality in cross-border KYC and CDD (Customer Due
+--   Diligence) workflows. Under FATF Recommendation 10 and the BSA's Customer
+--   Identification Program rules, regulated institutions must verify government-
+--   issued photo ID before onboarding customers. A DigitalPassport on Canton
+--   provides a cryptographically verifiable, authority-signed identity assertion
+--   that can be referenced in AML/KYC workflows without re-transmitting raw PII.
+--
+-- SIGNATORIES: authority, holder
+--   The issuing authority signs as the sovereign entity legally empowered to
+--   issue travel documents — its signature is the state's attestation of
+--   nationality and identity. The holder signs because the passport records
+--   their personal biometric data; GDPR requires data subject co-authorization
+--   for the creation of records containing special-category personal data.
+--   Critically, the authority retains unilateral control over Revoke and
+--   Suspend choices, reflecting the legal reality that passports are state
+--   property issued to citizens, not citizen-owned documents.
+--
+-- OBSERVERS: none
+--   No third-party observers on the issued passport. Verifiers access passport
+--   data through the selective disclosure pattern (IdentityRequest / UpdateRequest
+--   workflow), not by being listed as observers on the live passport contract.
+--   This enforces GDPR data minimization: a border control agency or bank
+--   that verified a passport once does not retain perpetual read access to
+--   the holder's current passport state.
+--
+-- COMPLIANCE:
+--   GDPR Art. 5(1)(c) — data minimization; observers granted only for active
+--   verification workflows, not persistently.
+--   GDPR Art. 9 — special-category biometric data requires dual-party
+--   authorization (authority + holder) to create or amend.
+--   BSA / FATF Rec. 10 — government-issued photo ID as primary KYC document;
+--   authority signature provides cryptographic proof of state issuance.
 template DigitalPassport
   with
     authority : Party

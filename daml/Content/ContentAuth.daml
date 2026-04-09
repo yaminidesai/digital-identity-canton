@@ -63,9 +63,57 @@ template ContentRegistrationRequest
       controller creator
       do pure ()
 
--- | A certificate proving content ownership/authenticity
--- Registry is sole signatory so it can manage lifecycle (disputes, transfers)
--- Creator is observer and controls licensing choices
+-- | A certificate proving content ownership/authenticity.
+--
+-- FINANCIAL CONTEXT:
+--   Represents a registered intellectual property credential that establishes
+--   provenance and chain of custody for digital content. In regulated financial
+--   contexts, content certificates are relevant to: (1) MiFID II transaction
+--   reporting where research, data, or software is licensed between regulated
+--   entities and ownership must be auditable; (2) AML scenarios where high-value
+--   digital assets (IP, software licenses, media rights) are used as financial
+--   instruments or collateral and beneficial ownership must be traceable; and
+--   (3) GDPR data processing agreements where the registry must be able to
+--   manage data lifecycle (revoke, transfer) without requiring re-consent
+--   from prior owners on every administrative action.
+--
+-- SIGNATORIES: registry
+--   The registry is the sole signatory by deliberate design. If the creator
+--   were also a signatory, then archiving the certificate (required for
+--   TransferOwnership and ResolveForChallenger) would require the creator's
+--   authorization — making it impossible to transfer ownership against a
+--   non-cooperating owner or resolve a dispute where the current owner
+--   contests the registry's decision. Registry as sole signatory reflects
+--   the legal model of a government or accredited registry that holds
+--   authoritative power over the certificate's lifecycle, analogous to a
+--   land registry's authority to transfer title without the seller's
+--   participation once a court order is issued.
+--
+-- OBSERVERS: creator
+--   The creator is an observer (not a signatory) so they have full visibility
+--   into their certificate and can exercise licensing and transfer choices,
+--   while the registry retains sole authority over the certificate's existence.
+--   This is the minimal observer set required: no third parties (licensees,
+--   challengers) are observers on the certificate itself — they interact
+--   through separate LicenseRequest and ContentDispute contracts, which
+--   follow their own observer patterns.
+--
+-- COMPLIANCE:
+--   MiFID II (2014/65/EU) Art. 25 — transaction reporting and audit trail
+--   for financial instruments; registry signatory provides authoritative
+--   chain-of-custody record for IP assets used in regulated transactions.
+--   GDPR Art. 17 — right to erasure; registry sole signatory enables
+--   compliant archival without requiring data subject re-authorization
+--   for each administrative lifecycle event. Note: GDPR Article 17(3)(b)
+--   exempts the right to erasure where processing is necessary for legal
+--   compliance. On Canton, GDPR compliance is achieved through contract
+--   archival — making records functionally inaccessible in normal operations
+--   while preserving ledger integrity. Physical deletion is architecturally
+--   impossible on an immutable ledger, and Article 17(3)(b) explicitly
+--   accommodates this.
+--   GDPR Art. 5(1)(c) — data minimization; only registry and current
+--   creator are observers; historical owners lose visibility on transfer,
+--   reflecting that they no longer have a legitimate interest.
 template ContentCertificate
   with
     registry : Party

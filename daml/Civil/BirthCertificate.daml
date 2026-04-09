@@ -54,6 +54,36 @@ template BirthRegistrationRequest
       do pure ()
 
 -- | An issued birth certificate
+--
+-- FINANCIAL CONTEXT:
+--   Represents the foundational civil registration event that establishes a
+--   natural person's legal existence within a jurisdiction. In regulated
+--   financial contexts, birth certificates are the root-of-trust identity
+--   document from which all downstream KYC, passport, and voter registration
+--   workflows derive. A tampered or fraudulently issued birth certificate
+--   propagates identity fraud through every subsequent compliance check.
+--
+-- SIGNATORIES: registry, holder
+--   The civil registry signs because it is the sovereign authority legally
+--   empowered to certify the birth event — its signature represents the
+--   state's attestation that the record is authentic. The holder (or their
+--   legal guardian at time of issuance) signs as the data subject under GDPR,
+--   providing informed consent for the processing of their biometric and
+--   personal data. Dual signatories ensure that neither party can unilaterally
+--   create, amend, or archive the foundational identity record.
+--
+-- OBSERVERS: none
+--   No third-party observers are listed by default. Access to birth records
+--   is granted on a need-to-know basis through downstream contracts
+--   (e.g., AmendmentRequest surfaces the record to the registry for review).
+--   This enforces GDPR Article 5(1)(c) data minimization: the record is
+--   not broadcast to any party beyond those who legally co-own it.
+--
+-- COMPLIANCE:
+--   GDPR Art. 5(1)(c) — data minimization; no unnecessary observer exposure.
+--   GDPR Art. 5(1)(f) — integrity and confidentiality of personal data.
+--   Civil registration law — dual-signatory model prevents unilateral
+--   amendment to a legal identity record without state authorization.
 template BirthCertificate
   with
     registry : Party

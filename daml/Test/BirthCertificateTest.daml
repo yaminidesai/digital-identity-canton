@@ -7,6 +7,32 @@ import DA.Optional (isNone)
 import Civil.BirthCertificate
 
 -- | Test 1: Full lifecycle — request → approve → certificate exists
+--
+-- PRIVACY GUARANTEE:
+--   Verifies that a BirthCertificate is visible to both the registry and the
+--   holder after issuance, and that the holder can read their own status,
+--   name, and registration fields. No third party is asserted to have access,
+--   confirming that the certificate's stakeholder set is exactly the two
+--   co-signatories. The holder's ability to query their own record via
+--   `queryContractId alice certCid` confirms that co-signing a contract in
+--   DAML grants read access to the data subject — a necessary property for
+--   any GDPR-compliant identity system.
+--
+-- REGULATORY SIGNIFICANCE:
+--   GDPR Article 15 grants data subjects the right of access to their own
+--   personal data. If the holder were not a signatory — and therefore not a
+--   stakeholder — they would be unable to query their own birth certificate
+--   on Canton, violating the right of access. The dual-signatory model
+--   simultaneously satisfies Article 15 (holder can read) and data
+--   minimization (no third parties can read without an explicit grant).
+--
+-- FAILURE MODE:
+--   If the registry were the sole signatory and the holder were demoted to
+--   an observer (or omitted), the registry could unilaterally create,
+--   amend, and archive identity records without the data subject's
+--   co-authorization — a surveillance model that would fail GDPR Article
+--   5(1)(f) integrity and confidentiality requirements and violate the
+--   principle of lawful processing under Article 6.
 testBirthCertificateLifecycle : Script ()
 testBirthCertificateLifecycle = do
   civilRegistry <- allocatePartyByHint (PartyIdHint "civil-registry")
@@ -44,6 +70,34 @@ testBirthCertificateLifecycle = do
   pure ()
 
 -- | Test 2: Amendment workflow — request amendment → approve → updated info
+--
+-- PRIVACY GUARANTEE:
+--   Verifies that an amendment to a birth certificate archives the original
+--   contract and creates a new one — and that the archived original is no
+--   longer queryable by either party. `queryContractId alice certCid` returns
+--   `None` after amendment, confirming that the previous state of the record
+--   is no longer active on the ledger. The new certificate carries the Amended
+--   status, providing an auditable signal that the record has been changed
+--   without exposing the prior data to parties who query only the current state.
+--
+-- REGULATORY SIGNIFICANCE:
+--   Civil registration law requires that amendments to birth certificates be
+--   traceable — a name change, for example, must be authorized by the registry
+--   and must not silently overwrite the original. The request/approve workflow
+--   enforces this: the holder can only request (AmendmentRequest), and the
+--   registry controls approval (ApproveAmendment, which archives the old cert
+--   and creates a new one). This models the two-party authorization requirement
+--   for amendment that prevents either party from unilaterally rewriting the
+--   foundational identity record. GDPR Article 16 grants the right to
+--   rectification; the amendment workflow is the compliant implementation of
+--   that right, with registry co-authorization ensuring accuracy.
+--
+-- FAILURE MODE:
+--   If amendments could be self-applied by the holder without registry approval,
+--   a person could change their name, date of birth, or nationality on their
+--   civil identity record unilaterally. This would corrupt the root-of-trust
+--   identity document that all downstream KYC, passport, and voting workflows
+--   derive from, enabling identity fraud at the foundational layer.
 testBirthCertificateAmendment : Script ()
 testBirthCertificateAmendment = do
   civilRegistry <- allocatePartyByHint (PartyIdHint "civil-registry")
@@ -94,6 +148,37 @@ testBirthCertificateAmendment = do
   pure ()
 
 -- | Test 3: Negative cases — unauthorized approval, void by non-registry, double void
+--
+-- PRIVACY GUARANTEE:
+--   Three `submitMustFail` assertions verify the authorization boundaries of
+--   the civil registration model: (1) a third party (Bob) cannot approve a
+--   BirthRegistrationRequest — he is not a stakeholder and the Approve choice
+--   is controlled by the registry; (2) the holder (Alice) cannot void her own
+--   certificate — Void is controlled by the registry; (3) after the registry
+--   voids the certificate, `queryContractId` returns `None`, confirming that
+--   archival makes the record inaccessible to all parties including the
+--   registry itself.
+--
+-- REGULATORY SIGNIFICANCE:
+--   The prohibition on holder-initiated voiding models the legal reality that
+--   a birth certificate is a state record, not a personal document — the holder
+--   cannot unilaterally destroy it. Civil registration law requires that
+--   certificates can only be voided by the issuing authority (the registry),
+--   and only for legally prescribed reasons (fraud, error, superseded by
+--   amendment). Allowing self-voiding would enable identity erasure: a person
+--   could destroy their civil identity record to defeat KYC checks, court
+--   orders, or law enforcement inquiries that depend on foundational identity
+--   tracing. The third-party blocking test confirms that the stakeholder model
+--   prevents non-parties from interfering with records they have no legal
+--   relationship to.
+--
+-- FAILURE MODE:
+--   In a permissioned database, holder-initiated deletion could be blocked by
+--   a stored procedure or trigger — but both are bypassable by a DBA or a
+--   sufficiently privileged API call. In DAML, the Void choice's controller
+--   field is part of the contract template: no deployment configuration or
+--   administrative access can grant the holder the ability to void their own
+--   certificate without modifying the source code and redeploying the DAR.
 testBirthCertificateNegativeCases : Script ()
 testBirthCertificateNegativeCases = do
   civilRegistry <- allocatePartyByHint (PartyIdHint "civil-registry")

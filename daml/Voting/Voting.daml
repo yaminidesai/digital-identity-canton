@@ -44,6 +44,43 @@ template VoterRegistrationRequest
       do pure ()
 
 -- | An approved voter registration
+--
+-- FINANCIAL CONTEXT:
+--   Represents a verified electoral identity credential. In jurisdictions
+--   that use voter registration as a KYC-adjacent identity proof, a
+--   VoterRegistration confirms that a natural person has been verified
+--   against national civil records (name, date of birth, address, constituency)
+--   by an independent government body. This contract models the output of that
+--   verification: an authoritative, co-signed attestation of electoral identity
+--   that downstream systems can reference without re-running the verification.
+--
+-- SIGNATORIES: commission, voter
+--   The election commission signs as the authority legally responsible for
+--   maintaining the electoral roll — its signature represents the state's
+--   confirmation that the voter meets eligibility criteria (citizenship, age,
+--   residence). The voter signs as the data subject who has affirmatively
+--   registered; this models the voluntary enrollment requirement in electoral
+--   law and satisfies GDPR's lawful basis of consent for processing electoral
+--   data. Commission-only signatories would allow state-imposed registration;
+--   dual-signatory enforces that registration is citizen-initiated.
+--
+-- OBSERVERS: none
+--   The electoral roll is not broadcast to third parties. The commission and
+--   voter are the only stakeholders. When the voter exercises CastBallot on
+--   an Election, they pass their VoterRegistration ContractId, and the Election
+--   contract fetches it to verify eligibility — the commission never needs to
+--   be listed as an observer on the ballot contract itself.
+--
+-- COMPLIANCE:
+--   Electoral law — dual-signatory prevents unilateral state enrollment or
+--   disenrollment without the citizen's co-authorization.
+--   GDPR Art. 9(2)(g) — processing of special category political data is
+--   permitted where necessary for reasons of substantial public interest,
+--   which applies to government-operated voter registration systems. The
+--   dual-signatory model ensures no single authority can unilaterally enroll
+--   a citizen, preventing state-imposed registration without consent.
+--   One-person-one-vote — enforced in Election.CastBallot by asserting
+--   `notElem voter voters` against the accumulated voter list.
 template VoterRegistration
   with
     commission : Party
